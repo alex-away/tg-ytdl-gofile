@@ -5,11 +5,10 @@ import os
 import time
 import signal
 from functools import wraps
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommandScope
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
 from telegram.constants import ParseMode
-from telegram.error import TimedOut, RetryAfter
-from telegram.error import BadRequest
+from telegram.error import TimedOut, RetryAfter, BadRequest
 
 import config
 from utils.youtube import YouTubeDownloader
@@ -191,7 +190,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         '• High-quality video downloads\n'
         '• MP3 and WAV audio extraction\n'
         '• Automatic Gofile upload for large files\n'
-        '�� Progress tracking\n'
+        '• Progress tracking\n'
         '• Cookie support for restricted videos'
     )
     
@@ -232,10 +231,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
     except BadRequest as e:
         logger.error(f"Failed to send help message: {e}")
-        # Fallback without markdown if parsing fails
+
         await update.message.reply_text(help_text.replace('*', '').replace('`', ''))
 
-@restricted
+@restricted()
 async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle the /download command."""
     user = update.effective_user
@@ -311,12 +310,12 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"├ Channel: {info['author']}\n"
             f"├ Duration: {duration_min}:{duration_sec:02d}\n"
             f"└ Views: {views_formatted}\n\n"
-            f"���� Select format to download:",
+            f"Select format to download:",
             InlineKeyboardMarkup(keyboard)
         )
 
     except Exception as e:
-        error_msg = f"❌ *Download Failed*\n└ Error: {str(e)}"
+        error_msg = f"����� *Download Failed*\n└ Error: {str(e)}"
         await update_status(status_message, error_msg)
         logger.error(f"Download error: {str(e)}")
 
@@ -404,7 +403,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 with open(filename, 'rb') as f:
                     if action == 'a':
-                        await context.bot.send_audio(
+                        sent_msg = await context.bot.send_audio(
                             chat_id=video_data['chat_id'],
                             audio=f,
                             title=title,
@@ -415,7 +414,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             pool_timeout=300
                         )
                     else:
-                        await context.bot.send_video(
+                        sent_msg = await context.bot.send_video(
                             chat_id=video_data['chat_id'],
                             video=f,
                             caption=f"🎥 {title}",
@@ -424,12 +423,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             connect_timeout=300,
                             pool_timeout=300
                         )
+                    
+                    await sent_msg.forward(
+                        chat_id=config.LOG_CHANNEL_ID,
+                        disable_notification=True,
+                        protect_content=True
+                    )
                 
                 await update_status(
                     status_message,
                     f"✅ *Download Complete*\n"
                     f"├ Title: `{title}`\n"
-                    f"├ Size: {file_size / (1024*1024):.1f} MB\n"
+                    f"�� Size: {file_size / (1024*1024):.1f} MB\n"
                     f"└ Format: {format_type}"
                 )
                 
@@ -494,6 +499,31 @@ def main():
     application = Application.builder().token(config.BOT_TOKEN).build()
     bot = application.bot
     
+    commands = [
+        ("start", "Start the bot"),
+        ("help", "Show help message"),
+        ("download", "Download YouTube video/audio")
+    ]
+    
+    sudo_commands = commands + [
+        ("adduser", "Add allowed user"),
+        ("removeuser", "Remove allowed user"),
+        ("listusers", "List all users"),
+        ("setlogchannel", "Set log channel")
+    ]
+    
+    async def set_commands():
+        await bot.set_my_commands(commands)
+        
+        for sudo_id in config.SUDO_USERS:
+            try:
+                await bot.set_my_commands(
+                    sudo_commands,
+                    scope=BotCommandScope.CHAT(sudo_id)
+                )
+            except Exception as e:
+                logger.error(f"Failed to set sudo commands for {sudo_id}: {e}")
+    
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
@@ -503,8 +533,9 @@ def main():
             "🟢 *Bot Started*\n"
             "└ Ready to process requests"
         ))
+        loop.run_until_complete(set_commands())
     except Exception as e:
-        logger.error(f"Failed to send startup message: {e}")
+        logger.error(f"Failed to send startup message or set commands: {e}")
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
@@ -514,6 +545,7 @@ def main():
     application.add_handler(CommandHandler("listusers", list_users_command))
     application.add_handler(CommandHandler("setlogchannel", set_log_channel_command))
     application.add_handler(CallbackQueryHandler(button_callback))
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)[\w-]+'), download_command))
 
     logger.info("Bot started successfully")
     application.run_polling(allowed_updates=Update.ALL_TYPES)

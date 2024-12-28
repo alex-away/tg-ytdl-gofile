@@ -56,7 +56,6 @@ class DownloadProgress:
                             f"└ ETA: {self._format_time(eta)}"
                         )
                 else:
-                    # For downloads without size info
                     if downloaded - self.last_size >= 1024 * 1024:  # 1MB change
                         self.last_size = downloaded
                         status = (
@@ -82,7 +81,7 @@ class DownloadProgress:
                 future.result(timeout=0.5)
                 
         except (asyncio.TimeoutError, Exception):
-            pass  # Silently handle timeouts and other errors
+            pass 
 
     def _get_progress_bar(self, percentage: float, length: int = 15) -> str:
         filled = int(length * percentage / 100)
