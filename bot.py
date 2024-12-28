@@ -315,9 +315,13 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     except Exception as e:
-        error_msg = f"����� *Download Failed*\n└ Error: {str(e)}"
+        error_msg = f"❌ *Download Failed*\n└ Error: {str(e)}"
         await update_status(status_message, error_msg)
         logger.error(f"Download error: {str(e)}")
+        await log_to_channel(
+            f"❌ *Download Error*\n"
+            f"└ Error: `{str(e)}`"
+        )
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle button callbacks for format selection."""
@@ -434,7 +438,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     status_message,
                     f"✅ *Download Complete*\n"
                     f"├ Title: `{title}`\n"
-                    f"�� Size: {file_size / (1024*1024):.1f} MB\n"
+                    f"└ Size: {file_size / (1024*1024):.1f} MB\n"
                     f"└ Format: {format_type}"
                 )
                 
@@ -471,7 +475,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error in button callback: {error_msg}")
         await update_status(query.message, f"❌ *Error*\n└ {error_msg}")
         await log_to_channel(
-            f"�� *Download Error*\n"
+            f"❌ *Download Error*\n"
             f"└ Error: `{error_msg}`"
         )
 

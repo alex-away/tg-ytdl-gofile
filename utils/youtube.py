@@ -17,7 +17,8 @@ class DownloadProgress:
         self.last_update = 0
         self.last_progress = 0
         self.last_size = 0
-        self.update_interval = 1.0  # Update every second
+        self.update_interval = 2.0
+        self.min_progress_change = 2.0
 
     async def _safe_callback(self, text: str):
         try:
@@ -39,8 +40,7 @@ class DownloadProgress:
                     progress = (downloaded / total) * 100
                     size_change = abs(downloaded - self.last_size) / (1024 * 1024)  # MB
                     
-                    # Only update if progress changed by 1% or size changed by 1MB
-                    if (abs(progress - self.last_progress) >= 1 or size_change >= 1):
+                    if (abs(progress - self.last_progress) >= self.min_progress_change or size_change >= 2):
                         self.last_progress = progress
                         self.last_size = downloaded
                         
@@ -56,7 +56,7 @@ class DownloadProgress:
                             f"└ ETA: {self._format_time(eta)}"
                         )
                 else:
-                    if downloaded - self.last_size >= 1024 * 1024:  # 1MB change
+                    if downloaded - self.last_size >= 2 * 1024 * 1024:  # 2MB change
                         self.last_size = downloaded
                         status = (
                             f"📥 *Downloading*\n"
@@ -70,18 +70,19 @@ class DownloadProgress:
                     self._safe_callback(status), 
                     self.loop
                 )
-                future.result(timeout=0.5)  # Shorter timeout
-                
-            elif d['status'] == 'finished':
-                self.last_update = current_time
-                future = asyncio.run_coroutine_threadsafe(
-                    self._safe_callback("⚙️ Processing download..."), 
-                    self.loop
-                )
                 future.result(timeout=0.5)
                 
+            elif d['status'] == 'finished':
+                if current_time - self.last_update >= self.update_interval:
+                    self.last_update = current_time
+                    future = asyncio.run_coroutine_threadsafe(
+                        self._safe_callback("⚙️ Processing download..."), 
+                        self.loop
+                    )
+                    future.result(timeout=0.5)
+                
         except (asyncio.TimeoutError, Exception):
-            pass 
+            pass
 
     def _get_progress_bar(self, percentage: float, length: int = 15) -> str:
         filled = int(length * percentage / 100)
