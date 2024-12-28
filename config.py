@@ -15,11 +15,6 @@ BOT_TOKEN = os.getenv('BOT_TOKEN')
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN is required in .env file")
 
-LOG_CHANNEL_ID = os.getenv('LOG_CHANNEL_ID')
-if not LOG_CHANNEL_ID:
-    raise ValueError("LOG_CHANNEL_ID is required in .env file")
-LOG_CHANNEL_ID = int(LOG_CHANNEL_ID)
-
 SUDO_USERS = os.getenv('SUDO_USERS', '')
 if not SUDO_USERS:
     raise ValueError("SUDO_USERS is required in .env file")
@@ -33,7 +28,7 @@ class UserManager:
         self.file_path = file_path
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
         self.allowed_users = set(USERS)
-        self.log_channel_id = LOG_CHANNEL_ID
+        self.log_channel_id = None
         logger.info(f"Initialized UserManager with {len(USERS)} users from .env")
         self.load_data()
 
@@ -46,8 +41,9 @@ class UserManager:
                     self.allowed_users.update(data.get('allowed_users', []))
                     after_count = len(self.allowed_users)
                     logger.info(f"Loaded {after_count - before_count} additional users from file")
-                    self.log_channel_id = data.get('log_channel_id', LOG_CHANNEL_ID)
-                    logger.info(f"Loaded log channel ID: {self.log_channel_id}")
+                    self.log_channel_id = data.get('log_channel_id')
+                    if self.log_channel_id:
+                        logger.info(f"Loaded log channel ID: {self.log_channel_id}")
         except Exception as e:
             logger.error(f"Error loading data from {self.file_path}: {e}")
 

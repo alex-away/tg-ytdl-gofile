@@ -30,7 +30,7 @@ def format_user_info(user) -> str:
 
 async def log_to_channel(text: str):
     log_channel_id = config.user_manager.get_log_channel()
-    if not log_channel_id or not bot:
+    if not log_channel_id:
         return
     try:
         await bot.send_message(
