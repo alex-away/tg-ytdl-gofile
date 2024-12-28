@@ -100,7 +100,11 @@ class YouTubeDownloader:
             'no_warnings': True,
             'extract_flat': False,
             'format': 'bestvideo*+bestaudio/best',
-            'merge_output_format': 'mp4'
+            'merge_output_format': 'mp4',
+            'check_formats': True,
+            'youtube_include_dash_manifest': True,
+            'youtube_include_hls_manifest': True,
+            'format_sort': ['res', 'ext:mp4:m4a', 'codec:h264:m4a', 'size', 'br', 'asr']
         }
         self._executor = ThreadPoolExecutor(max_workers=config.MAX_CONCURRENT_DOWNLOADS)
 
@@ -121,6 +125,7 @@ class YouTubeDownloader:
             **self.base_opts,
             'format': 'best',
             'youtube_include_dash_manifest': True,
+            'youtube_include_hls_manifest': True,
             'check_formats': True
         }
         
@@ -160,13 +165,13 @@ class YouTubeDownloader:
             ext = f.get('ext', '')
             vcodec = f.get('vcodec', '')
             acodec = f.get('acodec', '')
-            filesize = f.get('filesize', 0)
+            filesize = f.get('filesize', 0) or f.get('filesize_approx', 0)
             tbr = f.get('tbr', 0)
             
-            if not height or not ext or not vcodec or not acodec:
+            if not height or not ext or vcodec == 'none':
                 continue
             
-            if vcodec != 'none' and acodec != 'none':
+            if vcodec != 'none':
                 quality = f"{height}p"
                 if quality in config.SUPPORTED_VIDEO_QUALITIES:
                     if ext not in ['mp4', 'webm', 'mkv']:
@@ -183,7 +188,11 @@ class YouTubeDownloader:
                         'filesize': filesize,
                         'tbr': tbr,
                         'vcodec': vcodec,
-                        'acodec': acodec
+                        'acodec': acodec,
+                        'width': f.get('width', 0),
+                        'height': height,
+                        'fps': f.get('fps', 0),
+                        'format_note': f.get('format_note', '')
                     })
 
         for quality in video_formats:
@@ -192,8 +201,9 @@ class YouTubeDownloader:
                     key=lambda x: (
                         float(x.get('tbr', 0) or 0),
                         float(x.get('filesize', 0) or 0),
-                        bool(x.get('vcodec', '').startswith('avc1')),
-                        bool(x.get('acodec', '').startswith('mp4a'))
+                        float(x.get('fps', 0) or 0),
+                        x.get('vcodec', '').startswith('avc1'),
+                        x.get('acodec', '').startswith('mp4a')
                     ),
                     reverse=True
                 )
@@ -207,7 +217,7 @@ class YouTubeDownloader:
                 key=lambda x: (
                     float(x.get('abr', 0) or 0),
                     float(x.get('filesize', 0) or 0),
-                    bool(x.get('acodec', '').startswith('mp4a'))
+                    x.get('acodec', '').startswith('mp4a')
                 )
             )
             
@@ -235,7 +245,9 @@ class YouTubeDownloader:
                 **self.base_opts,
                 'progress_hooks': [progress.progress_hook],
                 'outtmpl': os.path.join(config.TEMP_PATH, '%(title)s.%(ext)s'),
-                'retries': 3
+                'retries': 3,
+                'fragment_retries': 10,
+                'http_chunk_size': 10485760
             }
 
             if format_type == 'audio':
