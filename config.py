@@ -29,14 +29,15 @@ USERS = os.getenv('USERS', '')
 USERS = [int(user_id.strip()) for user_id in USERS.split(',') if user_id.strip()]
 
 class UserManager:
-    def __init__(self, file_path='data/users.json'):
+    def __init__(self, file_path='data/data.json'):
         self.file_path = file_path
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
         self.allowed_users = set(USERS)
+        self.log_channel_id = LOG_CHANNEL_ID
         logger.info(f"Initialized UserManager with {len(USERS)} users from .env")
-        self.load_users()
+        self.load_data()
 
-    def load_users(self):
+    def load_data(self):
         try:
             if os.path.exists(self.file_path):
                 with open(self.file_path, 'r') as f:
@@ -45,17 +46,22 @@ class UserManager:
                     self.allowed_users.update(data.get('allowed_users', []))
                     after_count = len(self.allowed_users)
                     logger.info(f"Loaded {after_count - before_count} additional users from file")
+                    self.log_channel_id = data.get('log_channel_id', LOG_CHANNEL_ID)
+                    logger.info(f"Loaded log channel ID: {self.log_channel_id}")
         except Exception as e:
-            logger.error(f"Error loading users from {self.file_path}: {e}")
+            logger.error(f"Error loading data from {self.file_path}: {e}")
 
-    def save_users(self):
+    def save_data(self):
         try:
-            users_to_save = [u for u in self.allowed_users if u not in USERS]
+            data = {
+                'allowed_users': [u for u in self.allowed_users if u not in USERS],
+                'log_channel_id': self.log_channel_id
+            }
             with open(self.file_path, 'w') as f:
-                json.dump({'allowed_users': users_to_save}, f)
-            logger.info(f"Saved {len(users_to_save)} users to {self.file_path}")
+                json.dump(data, f)
+            logger.info(f"Saved {len(data['allowed_users'])} users and log channel ID to {self.file_path}")
         except Exception as e:
-            logger.error(f"Error saving users to {self.file_path}: {e}")
+            logger.error(f"Error saving data to {self.file_path}: {e}")
 
     def add_user(self, user_id: int) -> bool:
         if user_id in SUDO_USERS:
@@ -66,7 +72,7 @@ class UserManager:
             return False
         if user_id not in self.allowed_users:
             self.allowed_users.add(user_id)
-            self.save_users()
+            self.save_data()
             logger.info(f"Added user {user_id} to allowed users")
             return True
         logger.info(f"User {user_id} already in allowed users")
@@ -81,7 +87,7 @@ class UserManager:
             return False
         if user_id in self.allowed_users:
             self.allowed_users.remove(user_id)
-            self.save_users()
+            self.save_data()
             logger.info(f"Removed user {user_id} from allowed users")
             return True
         logger.info(f"Attempted to remove non-existent user {user_id}")
@@ -97,6 +103,13 @@ class UserManager:
 
     def is_sudo(self, user_id: int) -> bool:
         return user_id in SUDO_USERS
+
+    def set_log_channel(self, channel_id: int):
+        self.log_channel_id = channel_id
+        self.save_data()
+
+    def get_log_channel(self) -> int:
+        return self.log_channel_id
 
 user_manager = UserManager()
 

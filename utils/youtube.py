@@ -6,6 +6,7 @@ import yt_dlp
 from urllib.parse import parse_qs, urlparse
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 
 import config
 
@@ -122,20 +123,14 @@ class YouTubeDownloader:
             'format_sort': ['res', 'ext:mp4:m4a', 'codec:h264:m4a', 'size', 'br', 'asr']
         }
         self._executor = ThreadPoolExecutor(max_workers=config.MAX_CONCURRENT_DOWNLOADS)
+        self._info_executor = ThreadPoolExecutor(max_workers=10)
 
-    def _get_video_id(self, url: str) -> str:
-        try:
-            parsed_url = urlparse(url)
-            if parsed_url.hostname == 'youtu.be':
-                return parsed_url.path[1:]
-            if parsed_url.hostname in ('www.youtube.com', 'youtube.com'):
-                if parsed_url.path == '/watch':
-                    return parse_qs(parsed_url.query)['v'][0]
-        except:
-            pass
-        return hashlib.md5(url.encode()).hexdigest()[:10]
+    @lru_cache(maxsize=128)
+    async def _get_video_info_cached(self, url: str) -> Dict:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._info_executor, self._get_video_info, url)
 
-    def get_video_info(self, url: str) -> Dict:
+    def _get_video_info(self, url: str) -> Dict:
         ydl_opts = {
             **self.base_opts,
             'format': 'best',
@@ -169,6 +164,21 @@ class YouTubeDownloader:
         except Exception as e:
             raise Exception(f"Error getting video info: {str(e)}")
 
+    async def get_video_info(self, url: str) -> Dict:
+        return await self._get_video_info_cached(url)
+
+    def _get_video_id(self, url: str) -> str:
+        try:
+            parsed_url = urlparse(url)
+            if parsed_url.hostname == 'youtu.be':
+                return parsed_url.path[1:]
+            if parsed_url.hostname in ('www.youtube.com', 'youtube.com'):
+                if parsed_url.path == '/watch':
+                    return parse_qs(parsed_url.query)['v'][0]
+        except:
+            pass
+        return hashlib.md5(url.encode()).hexdigest()[:10]
+
     def _parse_formats(self, formats: List[Dict]) -> Dict:
         video_formats = {}
         
@@ -197,7 +207,7 @@ class YouTubeDownloader:
                     if ext not in video_formats[quality]:
                         video_formats[quality][ext] = []
                         
-                    video_formats[quality][ext].append({
+                    video_formats[quality][ext].append({  # noqa: Pylance
                         'format_id': f['format_id'],
                         'ext': ext,
                         'filesize': filesize,
@@ -329,3 +339,4 @@ class YouTubeDownloader:
 
     def __del__(self):
         self._executor.shutdown(wait=False) 
+        self._info_executor.shutdown(wait=False)

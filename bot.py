@@ -5,7 +5,7 @@ import os
 import time
 import signal
 from functools import wraps
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommandScope
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommandScope, BotCommandScopeChat
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
 from telegram.constants import ParseMode
 from telegram.error import TimedOut, RetryAfter, BadRequest
@@ -29,11 +29,12 @@ def format_user_info(user) -> str:
     return f"{user.first_name} (@{user.username})" if user.username else f"{user.first_name} ({user.id})"
 
 async def log_to_channel(text: str):
-    if not config.LOG_CHANNEL_ID or not bot:
+    log_channel_id = config.user_manager.get_log_channel()
+    if not log_channel_id or not bot:
         return
     try:
         await bot.send_message(
-            chat_id=config.LOG_CHANNEL_ID,
+            chat_id=log_channel_id,
             text=text,
             parse_mode=ParseMode.MARKDOWN
         )
@@ -162,8 +163,8 @@ async def set_log_channel_command(update: Update, context: ContextTypes.DEFAULT_
         
     try:
         channel_id = int(context.args[0])
-        old_channel = config.LOG_CHANNEL_ID
-        config.LOG_CHANNEL_ID = channel_id
+        old_channel = config.user_manager.get_log_channel()
+        config.user_manager.set_log_channel(channel_id)
         
         await update.message.reply_text(f"✅ Log channel updated to {channel_id}")
         await log_to_channel(
@@ -265,7 +266,7 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         downloader = YouTubeDownloader()
-        info = downloader.get_video_info(url)
+        info = await downloader.get_video_info(url)
         
         video_info_cache[info['video_id']] = {
             'url': url,
@@ -548,7 +549,7 @@ def main():
             try:
                 await bot.set_my_commands(
                     sudo_commands,
-                    scope=BotCommandScope.Chat(chat_id=sudo_id)
+                    scope=BotCommandScopeChat(chat_id=sudo_id)
                 )
             except Exception as e:
                 logger.error(f"Failed to set sudo commands for {sudo_id}: {e}")
@@ -564,14 +565,12 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
     
     try:
-        # Create and set event loop
+
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
-        # Run startup tasks
         loop.run_until_complete(startup())
         
-        # Add handlers
         application.add_handler(CommandHandler("start", start_command))
         application.add_handler(CommandHandler("help", help_command))
         application.add_handler(CommandHandler("download", download_command))
