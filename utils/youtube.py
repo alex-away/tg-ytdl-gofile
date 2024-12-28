@@ -15,6 +15,7 @@ class DownloadProgress:
         self.loop = loop
         self.start_time = time.time()
         self.last_update = 0
+        self.last_progress = 0
 
     async def _safe_callback(self, text: str):
         try:
@@ -25,18 +26,20 @@ class DownloadProgress:
     def progress_hook(self, d: Dict):
         try:
             current_time = time.time()
-            if current_time - self.last_update < 0.5:
+            if current_time - self.last_update < 2:
                 return
-            
-            self.last_update = current_time
             
             if d['status'] == 'downloading':
                 downloaded = d.get('downloaded_bytes', 0)
                 total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
                 
                 if total:
-                    speed = d.get('speed', 0)
                     progress = (downloaded / total) * 100
+                    if abs(progress - self.last_progress) < 5:
+                        return
+                    self.last_progress = progress
+                    
+                    speed = d.get('speed', 0)
                     eta = (total - downloaded) / speed if speed else 0
 
                     progress_bar = self._get_progress_bar(progress)
@@ -57,17 +60,24 @@ class DownloadProgress:
                     self._safe_callback(status), 
                     self.loop
                 )
-                future.result(timeout=5)
+                try:
+                    future.result(timeout=1)
+                except:
+                    pass
                 
             elif d['status'] == 'finished':
+                self.last_update = current_time
                 future = asyncio.run_coroutine_threadsafe(
                     self._safe_callback("⚙️ Processing download..."), 
                     self.loop
                 )
-                future.result(timeout=5)
+                try:
+                    future.result(timeout=1)
+                except:
+                    pass
                 
-        except Exception as e:
-            print(f"Progress error: {str(e)}")
+        except Exception:
+            pass
 
     def _get_progress_bar(self, percentage: float, length: int = 15) -> str:
         filled = int(length * percentage / 100)
@@ -230,8 +240,8 @@ class YouTubeDownloader:
                 })
 
         return {
-            'video': video_formats,
-            'audio': audio_formats
+            'audio': audio_formats,
+            'video': {k: video_formats[k] for k in sorted(video_formats.keys(), key=lambda x: int(x[:-1]))}
         }
 
     async def download(self, url: str, format_type: str, format_quality: str, format_ext: str, progress_callback: Callable[[str], None]) -> Tuple[str, str]:

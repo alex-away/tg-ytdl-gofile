@@ -1,6 +1,3 @@
 python-telegram-bot
-python-dotenv
 yt-dlp
-requests
-gofile2
-colorlog 
+gofile2 

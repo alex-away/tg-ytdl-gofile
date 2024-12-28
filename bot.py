@@ -1,25 +1,64 @@
+import asyncio
 import logging
 import re
 import os
+import time
 from functools import wraps
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from telegram.constants import ParseMode
-from telegram.error import TimedOut
+from telegram.error import TimedOut, RetryAfter
 
 import config
 from utils.youtube import YouTubeDownloader
 from utils.gofile import GoFileUploader
 
-# Set up logging
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    format='%(levelname)-8s %(message)s',
+    level=logging.WARNING
 )
 logger = logging.getLogger(__name__)
 
-# Store video information temporarily
 video_info_cache = {}
+last_update_time = {}
+bot = None
+
+async def log_to_channel(text: str):
+    """Send log message to the configured channel."""
+    if not config.LOG_CHANNEL_ID or not bot:
+        return
+    try:
+        await bot.send_message(
+            chat_id=config.LOG_CHANNEL_ID,
+            text=text,
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except Exception as e:
+        logger.error(f"Failed to send log to channel: {e}")
+
+async def update_status(message, text: str, keyboard=None):
+    """Update status message with rate limiting."""
+    message_id = f"{message.chat_id}_{message.message_id}"
+    current_time = time.time()
+    
+    if message_id in last_update_time:
+        time_diff = current_time - last_update_time[message_id]
+        if time_diff < 2:
+            return
+
+    try:
+        if keyboard:
+            await message.edit_text(text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+        else:
+            await message.edit_text(text, parse_mode=ParseMode.MARKDOWN)
+        last_update_time[message_id] = current_time
+        
+    except RetryAfter as e:
+        await asyncio.sleep(e.retry_after)
+    except TimedOut:
+        pass
+    except Exception as e:
+        logger.error(f"Error updating status: {str(e)}")
 
 def restricted(func):
     """Decorator to restrict bot usage to allowed users."""
@@ -66,21 +105,16 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
-async def update_status(message, text: str, keyboard=None):
-    """Update status message with error handling."""
-    try:
-        if keyboard:
-            await message.edit_text(text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
-        else:
-            await message.edit_text(text, parse_mode=ParseMode.MARKDOWN)
-    except TimedOut:
-        pass
-    except Exception as e:
-        logger.error(f"Error updating status: {str(e)}")
-
 @restricted
 async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle the /download command."""
+    user = update.effective_user
+    await log_to_channel(
+        f"🔄 *Download Request*\n"
+        f"├ User: `{user.name}` ({user.id})\n"
+        f"└ URL: `{context.args[0] if context.args else 'No URL provided'}`"
+    )
+    
     if not context.args:
         await update.message.reply_text(
             "ℹ️ Please provide a YouTube URL.\n"
@@ -94,7 +128,6 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Please provide a valid YouTube video URL.")
         return
 
-    # Single status message for all updates
     status_message = await update.message.reply_text(
         "🎥 *Processing Request*\n"
         "└ Fetching video information...",
@@ -102,11 +135,9 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     try:
-        # Get video information
         downloader = YouTubeDownloader()
         info = downloader.get_video_info(url)
         
-        # Cache video information
         video_info_cache[info['video_id']] = {
             'url': url,
             'info': info,
@@ -115,21 +146,8 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'user': update.effective_user.name
         }
 
-        # Create format selection buttons
         keyboard = []
-        
-        # Video formats
-        for quality in sorted(info['formats']['video'].keys(), 
-                            key=lambda x: int(x[:-1]), reverse=True):
-            for ext in sorted(info['formats']['video'][quality].keys()):
-                keyboard.append([
-                    InlineKeyboardButton(
-                        f"🎥 {quality} • {ext.upper()}",
-                        callback_data=f"v_{quality}_{ext}_{info['video_id']}"
-                    )
-                ])
-        
-        # Audio formats
+
         audio_row = []
         for audio_format in config.SUPPORTED_AUDIO_FORMATS:
             audio_row.append(
@@ -139,8 +157,19 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             )
         keyboard.append(audio_row)
+        
+        for quality in sorted(info['formats']['video'].keys(), 
+                            key=lambda x: int(x[:-1])):
+            row = []
+            for ext in sorted(info['formats']['video'][quality].keys()):
+                row.append(
+                    InlineKeyboardButton(
+                        f"🎥 {quality} • {ext.upper()}",
+                        callback_data=f"v_{quality}_{ext}_{info['video_id']}"
+                    )
+                )
+            keyboard.append(row)
 
-        # Format video information
         duration_min = info['duration'] // 60
         duration_sec = info['duration'] % 60
         views_formatted = "{:,}".format(info['views'])
@@ -167,7 +196,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer("✅ Processing your selection...")
 
     try:
-        # Parse callback data
         action, format_type, format_ext, video_id = query.data.split('_')
         
         if video_id not in video_info_cache:
@@ -176,9 +204,29 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         video_data = video_info_cache[video_id]
         status_message = query.message
+        
+        await log_to_channel(
+            f"📥 *Download Started*\n"
+            f"├ User: `{video_data['user']}`\n"
+            f"├ Title: `{video_data['info']['title']}`\n"
+            f"├ Type: {'Audio' if action == 'a' else 'Video'}\n"
+            f"└ Format: {format_type}"
+        )
 
-        # Progress callback for single message updates
+        last_progress_update = {'time': 0, 'percentage': 0}
+        
         async def progress_callback(text: str):
+            current_time = time.time()
+            if 'progress' in text:
+                try:
+                    current_percentage = float(re.search(r'(\d+\.\d+)%', text).group(1))
+                    if (current_time - last_progress_update['time'] < 2 and 
+                        abs(current_percentage - last_progress_update['percentage']) < 10):
+                        return
+                    last_progress_update.update({'time': current_time, 'percentage': current_percentage})
+                except:
+                    pass
+            
             full_text = (
                 f"🎥 *YouTube Download*\n"
                 f"├ Title: `{video_data['info']['title']}`\n"
@@ -186,7 +234,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             await update_status(status_message, full_text)
 
-        # Start download
         downloader = YouTubeDownloader()
         filename, title = await downloader.download(
             video_data['url'],
@@ -196,80 +243,123 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             progress_callback
         )
 
-        # Check file size
         file_size = downloader.get_file_size(filename)
         
-        if file_size > (config.MAX_DOWNLOAD_SIZE * 1024 * 1024):  # Convert MB to bytes
-            await progress_callback("📤 File too large for Telegram. Uploading to Gofile...")
-            
-            # Upload to Gofile
-            gofile = GoFileUploader()
-            result = await gofile.upload_file(filename, progress_callback)
-            
-            # Final status update with Gofile link
-            final_text = (
-                f"✅ *Download Complete*\n"
-                f"├ Title: `{title}`\n"
-                f"├ Size: {file_size / (1024*1024):.1f} MB\n"
-                f"├ Format: {format_type}\n"
-                f"└ [Download from Gofile]({result['download_link']})\n\n"
-                f"⚠️ Note: Link expires after some time"
-            )
-            await update_status(status_message, final_text)
-            
-        else:
-            # Send file directly through Telegram
-            await progress_callback("📤 Uploading to Telegram...")
-            
-            with open(filename, 'rb') as f:
-                if action == 'a':
-                    await context.bot.send_audio(
-                        chat_id=video_data['chat_id'],
-                        audio=f,
-                        title=title,
-                        caption=f"🎵 {title}"
-                    )
-                else:
-                    await context.bot.send_video(
-                        chat_id=video_data['chat_id'],
-                        video=f,
-                        caption=f"🎥 {title}"
-                    )
-            
-            # Final status update
-            await update_status(
-                status_message,
-                f"✅ *Download Complete*\n"
-                f"├ Title: `{title}`\n"
-                f"├ Size: {file_size / (1024*1024):.1f} MB\n"
-                f"└ Format: {format_type}"
-            )
-
-        # Cleanup
         try:
-            os.remove(filename)
-        except:
-            pass
+            if file_size > (config.MAX_DOWNLOAD_SIZE * 1024 * 1024):
+                await progress_callback("📤 File too large for Telegram. Uploading to Gofile...")
+                
+                gofile = GoFileUploader()
+                result = await gofile.upload_file(filename, progress_callback)
+                
+                final_text = (
+                    f"✅ *Download Complete*\n"
+                    f"├ Title: `{title}`\n"
+                    f"├ Size: {file_size / (1024*1024):.1f} MB\n"
+                    f"├ Format: {format_type}\n"
+                    f"└ [Download from Gofile]({result['download_link']})\n\n"
+                    f"⚠️ Note: Link expires after some time"
+                )
+                await update_status(status_message, final_text)
+                
+                await log_to_channel(
+                    f"✅ *Upload Complete (Gofile)*\n"
+                    f"├ User: `{video_data['user']}`\n"
+                    f"├ Title: `{title}`\n"
+                    f"└ Size: {file_size / (1024*1024):.1f} MB"
+                )
+                
+            else:
+                await progress_callback("📤 Uploading to Telegram...")
+                
+                with open(filename, 'rb') as f:
+                    if action == 'a':
+                        await context.bot.send_audio(
+                            chat_id=video_data['chat_id'],
+                            audio=f,
+                            title=title,
+                            caption=f"🎵 {title}",
+                            read_timeout=300,
+                            write_timeout=300,
+                            connect_timeout=300,
+                            pool_timeout=300
+                        )
+                    else:
+                        await context.bot.send_video(
+                            chat_id=video_data['chat_id'],
+                            video=f,
+                            caption=f"🎥 {title}",
+                            read_timeout=300,
+                            write_timeout=300,
+                            connect_timeout=300,
+                            pool_timeout=300
+                        )
+                
+                await update_status(
+                    status_message,
+                    f"✅ *Download Complete*\n"
+                    f"├ Title: `{title}`\n"
+                    f"├ Size: {file_size / (1024*1024):.1f} MB\n"
+                    f"└ Format: {format_type}"
+                )
+                
+                await log_to_channel(
+                    f"✅ *Upload Complete (Telegram)*\n"
+                    f"├ User: `{video_data['user']}`\n"
+                    f"├ Title: `{title}`\n"
+                    f"└ Size: {file_size / (1024*1024):.1f} MB"
+                )
+                
+        finally:
+            try:
+                if os.path.exists(filename):
+                    os.remove(filename)
+                    await log_to_channel(
+                        f"🗑 *File Deleted*\n"
+                        f"└ Path: `{filename}`"
+                    )
+            except Exception as e:
+                logger.error(f"Failed to delete file {filename}: {str(e)}")
+                await log_to_channel(
+                    f"⚠️ *File Deletion Failed*\n"
+                    f"├ Path: `{filename}`\n"
+                    f"└ Error: `{str(e)}`"
+                )
 
-        # Remove from cache
         del video_info_cache[video_id]
 
+    except TimedOut:
+        await update_status(query.message, "⚠️ Upload timed out, but the file might still be processing. Please check your chat.")
+        await log_to_channel("⚠️ *Upload Timed Out*")
     except Exception as e:
-        logger.error(f"Error in button callback: {str(e)}")
-        await update_status(query.message, f"❌ *Error*\n└ {str(e)}")
+        error_msg = str(e)
+        logger.error(f"Error in button callback: {error_msg}")
+        await update_status(query.message, f"❌ *Error*\n└ {error_msg}")
+        await log_to_channel(
+            f"❌ *Download Error*\n"
+            f"└ Error: `{error_msg}`"
+        )
 
 def main():
     """Start the bot."""
-    # Create the Application
+    global bot
+    
     application = Application.builder().token(config.BOT_TOKEN).build()
+    bot = application.bot
+    
+    try:
+        asyncio.get_event_loop().run_until_complete(log_to_channel(
+            "🤖 *Bot Started*\n"
+            "└ Ready to process requests"
+        ))
+    except Exception as e:
+        logger.error(f"Failed to send startup message: {e}")
 
-    # Add handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("download", download_command))
     application.add_handler(CallbackQueryHandler(button_callback))
 
-    # Start the Bot
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
