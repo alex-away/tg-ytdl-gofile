@@ -96,9 +96,8 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Single status message for all updates
     status_message = await update.message.reply_text(
-        "🎥 *YouTube Download*\n"
-        "👤 User: {}\n"
-        "🔄 Status: Fetching video information...".format(update.effective_user.name),
+        "🎥 *Processing Request*\n"
+        "└ Fetching video information...",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -122,12 +121,13 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Video formats
         for quality in sorted(info['formats']['video'].keys(), 
                             key=lambda x: int(x[:-1]), reverse=True):
-            keyboard.append([
-                InlineKeyboardButton(
-                    f"🎥 Video {quality}",
-                    callback_data=f"v_{quality}_{info['video_id']}"
-                )
-            ])
+            for ext in sorted(info['formats']['video'][quality].keys()):
+                keyboard.append([
+                    InlineKeyboardButton(
+                        f"🎥 {quality} • {ext.upper()}",
+                        callback_data=f"v_{quality}_{ext}_{info['video_id']}"
+                    )
+                ])
         
         # Audio formats
         audio_row = []
@@ -135,7 +135,7 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             audio_row.append(
                 InlineKeyboardButton(
                     f"🎵 {audio_format.upper()}",
-                    callback_data=f"a_{audio_format}_{info['video_id']}"
+                    callback_data=f"a_{audio_format}_none_{info['video_id']}"
                 )
             )
         keyboard.append(audio_row)
@@ -147,29 +147,28 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update_status(
             status_message,
-            f"🎥 *YouTube Download*\n"
-            f"👤 User: {update.effective_user.name}\n"
-            f"📝 Title: `{info['title']}`\n"
-            f"👤 Channel: {info['author']}\n"
-            f"⏱ Duration: {duration_min}:{duration_sec:02d}\n"
-            f"👁 Views: {views_formatted}\n\n"
+            f"📽 *Video Information*\n"
+            f"├ Title: `{info['title']}`\n"
+            f"├ Channel: {info['author']}\n"
+            f"├ Duration: {duration_min}:{duration_sec:02d}\n"
+            f"└ Views: {views_formatted}\n\n"
             f"🎯 Select format to download:",
             InlineKeyboardMarkup(keyboard)
         )
 
     except Exception as e:
-        error_msg = f"❌ Download Failed\n👤 User: {update.effective_user.name}\n⚠️ Error: {str(e)}"
+        error_msg = f"❌ *Download Failed*\n└ Error: {str(e)}"
         await update_status(status_message, error_msg)
         logger.error(f"Download error: {str(e)}")
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle button callbacks for format selection."""
     query = update.callback_query
-    await query.answer()
+    await query.answer("✅ Processing your selection...")
 
     try:
         # Parse callback data
-        action, format_type, video_id = query.data.split('_')
+        action, format_type, format_ext, video_id = query.data.split('_')
         
         if video_id not in video_info_cache:
             await update_status(query.message, "❌ Session expired. Please try downloading again.")
@@ -182,9 +181,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         async def progress_callback(text: str):
             full_text = (
                 f"🎥 *YouTube Download*\n"
-                f"👤 User: {video_data['user']}\n"
-                f"📝 Title: `{video_data['info']['title']}`\n\n"
-                f"Status: {text}"
+                f"├ Title: `{video_data['info']['title']}`\n"
+                f"└ Status:\n{text}"
             )
             await update_status(status_message, full_text)
 
@@ -194,6 +192,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             video_data['url'],
             'audio' if action == 'a' else 'video',
             format_type,
+            format_ext,
             progress_callback
         )
 
@@ -209,11 +208,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             # Final status update with Gofile link
             final_text = (
-                f"✅ Download Complete!\n"
-                f"👤 User: {video_data['user']}\n"
-                f"📝 Title: `{title}`\n"
-                f"📦 Size: {file_size / (1024*1024):.1f}MB\n"
-                f"🔗 Download: [Gofile]({result['download_link']})\n\n"
+                f"✅ *Download Complete*\n"
+                f"├ Title: `{title}`\n"
+                f"├ Size: {file_size / (1024*1024):.1f} MB\n"
+                f"├ Format: {format_type}\n"
+                f"└ [Download from Gofile]({result['download_link']})\n\n"
                 f"⚠️ Note: Link expires after some time"
             )
             await update_status(status_message, final_text)
@@ -240,10 +239,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Final status update
             await update_status(
                 status_message,
-                f"✅ Download Complete!\n"
-                f"👤 User: {video_data['user']}\n"
-                f"📝 Title: `{title}`\n"
-                f"📦 Size: {file_size / (1024*1024):.1f}MB"
+                f"✅ *Download Complete*\n"
+                f"├ Title: `{title}`\n"
+                f"├ Size: {file_size / (1024*1024):.1f} MB\n"
+                f"└ Format: {format_type}"
             )
 
         # Cleanup
@@ -257,7 +256,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logger.error(f"Error in button callback: {str(e)}")
-        await update_status(query.message, f"❌ Error: {str(e)}")
+        await update_status(query.message, f"❌ *Error*\n└ {str(e)}")
 
 def main():
     """Start the bot."""
