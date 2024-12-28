@@ -9,9 +9,10 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotComm
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
 from telegram.constants import ParseMode
 from telegram.error import TimedOut, RetryAfter, BadRequest
+import shutil
 
 import config
-from utils.youtube import YouTubeDownloader
+from utils.youtube import YouTubeDownloader, set_youtube_cookies
 from utils.gofile import GoFileUploader
 
 logging.basicConfig(
@@ -24,6 +25,9 @@ video_info_cache = {}
 last_update_time = {}
 bot = None
 upload_progress = {}
+
+COOKIE_PATH = os.path.join('data', 'cookies.txt')
+os.makedirs('data', exist_ok=True)
 
 def format_user_info(user) -> str:
     return f"{user.first_name} (@{user.username})" if user.username else f"{user.first_name} ({user.id})"
@@ -214,7 +218,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "`/adduser <user_id>` - Add allowed user\n"
             "`/removeuser <user_id>` - Remove allowed user\n"
             "`/listusers` - List all users\n"
-            "`/setlogchannel <channel_id>` - Set log channel\n\n"
+            "`/setlogchannel <channel_id>` - Set log channel\n"
+            "`/setcookie` - Set YouTube cookies for restricted videos\n"
+            "`/cookieytdl <url>` - Download using stored cookies\n\n"
         )
     
     help_text += (
@@ -263,7 +269,17 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     try:
-        downloader = YouTubeDownloader()
+
+        use_cookies = context.user_data.get('use_cookies', False)
+        if use_cookies:
+            cookie_path = os.path.join('data', 'cookies.txt')
+            if not os.path.exists(cookie_path):
+                await update_status(status_message, "❌ No cookies found. Please contact a sudo user to set up cookies.")
+                return
+        else:
+            cookie_path = None
+        
+        downloader = YouTubeDownloader(cookie_path=cookie_path)
         info = await downloader.get_video_info(url)
         
         video_info_cache[info['video_id']] = {
@@ -271,7 +287,8 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'info': info,
             'message_id': status_message.message_id,
             'chat_id': status_message.chat_id,
-            'user': update.effective_user.name
+            'user': update.effective_user.name,
+            'use_cookies': use_cookies
         }
 
         keyboard = []
@@ -312,6 +329,9 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Select format to download:",
             InlineKeyboardMarkup(keyboard)
         )
+
+        if 'use_cookies' in context.user_data:
+            del context.user_data['use_cookies']
 
     except Exception as e:
         error_msg = f"❌ *Download Failed*\n└ Error: {str(e)}"
@@ -366,7 +386,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             await update_status(status_message, full_text)
 
-        downloader = YouTubeDownloader()
+        cookie_path = os.path.join('data', 'cookies.txt') if video_data.get('use_cookies') else None
+        downloader = YouTubeDownloader(cookie_path=cookie_path)
+        
         filename, title = await downloader.download(
             video_data['url'],
             'audio' if action == 'a' else 'video',
@@ -469,7 +491,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 await update_status(
                     status_message,
-                    f"✅ *Download Complete*\n"
+                    f" *Download Complete*\n"
                     f"├ Title: `{title}`\n"
                     f"└ Size: {file_size / (1024*1024):.1f} MB\n"
                     f"└ Format: {format_type}"
@@ -532,14 +554,16 @@ def main():
     commands = [
         ("start", "Start the bot"),
         ("help", "Show help message"),
-        ("download", "Download YouTube video/audio")
+        ("download", "Download YouTube video/audio"),
+        ("cookieytdl", "Download using stored cookies")
     ]
     
     sudo_commands = commands + [
         ("adduser", "Add allowed user"),
         ("removeuser", "Remove allowed user"),
         ("listusers", "List all users"),
-        ("setlogchannel", "Set log channel")
+        ("setlogchannel", "Set log channel"),
+        ("setcookie", "Set YouTube cookies for restricted videos")
     ]
     
     async def set_commands():
@@ -565,7 +589,6 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
     
     try:
-
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
@@ -574,10 +597,12 @@ def main():
         application.add_handler(CommandHandler("start", start_command))
         application.add_handler(CommandHandler("help", help_command))
         application.add_handler(CommandHandler("download", download_command))
+        application.add_handler(CommandHandler("cookieytdl", cookieytdl_command))
         application.add_handler(CommandHandler("adduser", add_user_command))
         application.add_handler(CommandHandler("removeuser", remove_user_command))
         application.add_handler(CommandHandler("listusers", list_users_command))
         application.add_handler(CommandHandler("setlogchannel", set_log_channel_command))
+        application.add_handler(CommandHandler("setcookie", set_cookie_command))
         application.add_handler(CallbackQueryHandler(button_callback))
         application.add_handler(MessageHandler(
             filters.TEXT & filters.Regex(r'https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)[\w-]+'),
@@ -590,6 +615,101 @@ def main():
     except Exception as e:
         logger.error(f"Failed to start bot: {e}")
         raise
+
+@restricted(sudo_only=True)
+async def set_cookie_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /setcookie command for sudo users."""
+
+    if update.message.reply_to_message and update.message.reply_to_message.document:
+        document = update.message.reply_to_message.document
+    elif update.message.document:
+        document = update.message.document
+    else:
+        await update.message.reply_text(
+            "❌ Please send a cookie file in Netscape/Mozilla format.\n\n"
+            "*How to get cookies:*\n"
+            "1. Install a cookie exporter extension\n"
+            "2. Go to YouTube in a private/incognito window\n"
+            "3. Log in to your account\n"
+            "4. Export cookies and send the file here\n"
+            "5. Close the private/incognito window",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    try:
+
+        cookie_file = await document.get_file()
+        cookie_bytes = await cookie_file.download_as_bytearray()
+
+        temp_cookie_path = os.path.join(config.TEMP_PATH, 'temp_cookies.txt')
+        with open(temp_cookie_path, 'wb') as f:
+            f.write(cookie_bytes)
+
+        if set_youtube_cookies(temp_cookie_path):
+            await update.message.reply_text(
+                "✅ *Cookies Set Successfully*\n"
+                "You can now use `/cookieytdl` to download restricted videos.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            await log_to_channel(
+                "🔄 *Cookies Updated*\n"
+                f"├ By: `{format_user_info(update.effective_user)}`\n"
+                f"└ Status: Success"
+            )
+        else:
+            await update.message.reply_text("❌ Invalid cookie file format. Please send a valid Netscape/Mozilla format cookie file.")
+
+        try:
+            os.remove(temp_cookie_path)
+        except:
+            pass
+
+    except Exception as e:
+        logger.error(f"Cookie file error: {e}")
+        await update.message.reply_text(f"❌ Error processing cookie file: {str(e)}")
+        await log_to_channel(
+            "⚠️ *Cookie Update Failed*\n"
+            f"├ By: `{format_user_info(update.effective_user)}`\n"
+            f"└ Error: `{str(e)}`"
+        )
+
+@restricted()
+async def cookieytdl_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /cookieytdl command to download using stored cookies."""
+    cookie_path = os.path.join('data', 'cookies.txt')
+    
+    if not os.path.exists(cookie_path):
+        if update.effective_user.id in config.SUDO_USERS:
+            await update.message.reply_text(
+                "❌ No cookies set. Use /setcookie to add cookies first.\n\n"
+                "*How to set cookies:*\n"
+                "1. Use /setcookie command\n"
+                "2. Reply with a cookie file in Netscape format\n"
+                "3. Wait for confirmation",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            await update.message.reply_text(
+                "❌ No cookies available. Please contact a sudo user to set up cookies."
+            )
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "ℹ️ Please provide a YouTube URL.\n"
+            "📝 Example: `/cookieytdl https://youtube.com/watch?v=...`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    context.user_data['use_cookies'] = True
+    await download_command(update, context)
+
+def add_handlers(application: Application):
+
+    application.add_handler(CommandHandler("setcookie", set_cookie_command))
+    application.add_handler(CommandHandler("cookieytdl", cookieytdl_command))
 
 if __name__ == '__main__':
     main() 

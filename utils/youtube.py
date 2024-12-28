@@ -7,8 +7,49 @@ from urllib.parse import parse_qs, urlparse
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
+import shutil
+import logging
 
 import config
+
+logger = logging.getLogger(__name__)
+
+def set_youtube_cookies(cookie_path: str) -> bool:
+    """
+    Set YouTube cookies from a cookie file.
+    
+    Args:
+        cookie_path: Path to the cookie file in Netscape/Mozilla format
+        
+    Returns:
+        bool: True if cookies were set successfully, False otherwise
+    """
+    try:
+        if not os.path.exists(cookie_path):
+            logger.error(f"Cookie file not found: {cookie_path}")
+            return False
+            
+        with open(cookie_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+            if not (content.startswith('# Netscape HTTP Cookie File') or 
+                    content.startswith('# HTTP Cookie File')):
+                logger.error("Invalid cookie file format")
+                return False
+        
+        os.makedirs('data', exist_ok=True)
+        target_path = os.path.join('data', 'cookies.txt')
+        
+        if os.path.exists(target_path):
+            logger.info(f"Existing cookies found, overwriting: {target_path}")
+            os.remove(target_path)
+            
+        shutil.copy2(cookie_path, target_path)
+        logger.info(f"Cookies successfully copied to {target_path}")
+        
+        return True
+    except Exception as e:
+        logger.error(f"Error setting cookies: {e}")
+        return False
 
 class DownloadProgress:
     def __init__(self, callback: Callable[[str], None], loop: asyncio.AbstractEventLoop):
@@ -108,9 +149,20 @@ class DownloadProgress:
 
 class YouTubeDownloader:
     def __init__(self, cookie_path: Optional[str] = None):
-        self.cookie_path = cookie_path
+        """
+        Initialize YouTube downloader with optional cookie support.
+        
+        Args:
+            cookie_path: Optional path to cookie file for authenticated downloads
+        """
+        self.cookie_path = cookie_path or os.path.join('data', 'cookies.txt')
+        if os.path.exists(self.cookie_path):
+            logger.info(f"Using cookies from: {self.cookie_path}")
+        else:
+            logger.info("No cookies found, running without authentication")
+            
         self.base_opts = {
-            'cookiefile': cookie_path,
+            'cookiefile': self.cookie_path if os.path.exists(self.cookie_path) else None,
             'noplaylist': True,
             'quiet': True,
             'no_warnings': True,
@@ -124,6 +176,7 @@ class YouTubeDownloader:
         }
         self._executor = ThreadPoolExecutor(max_workers=config.MAX_CONCURRENT_DOWNLOADS)
         self._info_executor = ThreadPoolExecutor(max_workers=10)
+        logger.debug("YouTubeDownloader initialized with options: %s", self.base_opts)
 
     @lru_cache(maxsize=128)
     async def _get_video_info_cached(self, url: str) -> Dict:
@@ -140,17 +193,21 @@ class YouTubeDownloader:
         }
         
         try:
+            logger.info(f"Fetching video info for: {url}")
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
                 if not info:
+                    logger.error("Could not fetch video information")
                     raise Exception("Could not fetch video information")
                 
                 video_id = self._get_video_id(url)
                 formats = self._parse_formats(info.get('formats', []))
                 
                 if not formats['video'] and not formats['audio']:
+                    logger.error("No supported formats found")
                     raise Exception("No supported formats found")
                 
+                logger.info(f"Successfully fetched info for video: {info.get('title', 'Unknown Title')}")
                 return {
                     'title': info.get('title', 'Unknown Title'),
                     'duration': info.get('duration', 0),
@@ -162,6 +219,7 @@ class YouTubeDownloader:
                     'description': info.get('description', '')
                 }
         except Exception as e:
+            logger.error(f"Error getting video info: {str(e)}")
             raise Exception(f"Error getting video info: {str(e)}")
 
     async def get_video_info(self, url: str) -> Dict:
@@ -317,8 +375,10 @@ class YouTubeDownloader:
     def _download(self, url: str, ydl_opts: Dict) -> Optional[Tuple[str, str]]:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             try:
+                logger.info(f"Starting download for: {url}")
                 info = ydl.extract_info(url)
                 if not info:
+                    logger.error("Download failed - no info returned")
                     return None
                     
                 filename = ydl.prepare_filename(info)
@@ -326,9 +386,10 @@ class YouTubeDownloader:
                 if 'postprocessors' in ydl_opts:
                     filename = os.path.splitext(filename)[0] + f".{ydl_opts['postprocessors'][0]['preferredcodec']}"
                 
+                logger.info(f"Download completed: {filename}")
                 return filename, info.get('title', 'Unknown Title')
             except Exception as e:
-                print(f"Download error: {str(e)}")
+                logger.error(f"Download error: {str(e)}")
                 return None
 
     def get_file_size(self, file_path: str) -> int:
