@@ -9,6 +9,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
 from telegram.constants import ParseMode
 from telegram.error import TimedOut, RetryAfter
+from telegram.error import BadRequest
 
 import config
 from utils.youtube import YouTubeDownloader
@@ -71,16 +72,6 @@ def restricted(sudo_only=False):
             user_info = format_user_info(update.effective_user)
             command = update.message.text.split()[0] if update.message.text else "unknown"
             
-            if sudo_only and user_id not in config.SUDO_USERS:
-                logger.warning(f"Sudo access denied for {user_info}")
-                await log_to_channel(
-                    f"⚠️ *Unauthorized Sudo Access Attempt*\n"
-                    f"├ User: `{user_info}`\n"
-                    f"└ Command: `{command}`"
-                )
-                await update.message.reply_text("🚫 This command is only available to sudo users.")
-                return
-            
             if not config.user_manager.is_allowed(user_id):
                 logger.warning(f"Access denied for {user_info}")
                 await log_to_channel(
@@ -89,6 +80,16 @@ def restricted(sudo_only=False):
                     f"└ Command: `{command}`"
                 )
                 await update.message.reply_text("🚫 You are not authorized to use this bot.")
+                return
+            
+            if sudo_only and user_id not in config.SUDO_USERS:
+                logger.warning(f"Sudo access denied for {user_info}")
+                await log_to_channel(
+                    f"⚠️ *Unauthorized Sudo Access Attempt*\n"
+                    f"├ User: `{user_info}`\n"
+                    f"└ Command: `{command}`"
+                )
+                await update.message.reply_text("🚫 This command is only available to sudo users.")
                 return
                 
             return await func(update, context, *args, **kwargs)
@@ -190,7 +191,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         '• High-quality video downloads\n'
         '• MP3 and WAV audio extraction\n'
         '• Automatic Gofile upload for large files\n'
-        '• Progress tracking\n'
+        '�� Progress tracking\n'
         '• Cookie support for restricted videos'
     )
     
@@ -203,31 +204,36 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     help_text = (
-        '🎥 *Available Commands*:\n\n'
-        '▶️ /start - Start the bot\n'
-        '❓ /help - Show this help message\n'
-        '⬇️ /download <url> - Download YouTube video\n\n'
+        "*🎥 Available Commands:*\n\n"
+        "`/start` - Start the bot\n"
+        "`/help` - Show this help message\n"
+        "`/download <url>` - Download YouTube video\n\n"
     )
     
     if user_id in config.SUDO_USERS:
         help_text += (
-            '*Sudo Commands*:\n'
-            '👥 /adduser <user_id> - Add allowed user\n'
-            '👥 /removeuser <user_id> - Remove allowed user\n'
-            '👥 /listusers - List all users\n'
-            '📢 /setlogchannel <channel_id> - Set log channel\n\n'
+            "*Sudo Commands:*\n"
+            "`/adduser <user_id>` - Add allowed user\n"
+            "`/removeuser <user_id>` - Remove allowed user\n"
+            "`/listusers` - List all users\n"
+            "`/setlogchannel <channel_id>` - Set log channel\n\n"
         )
     
     help_text += (
-        '📋 *How to use*:\n'
-        '1. Send /download command with YouTube URL\n'
-        '2. Select video quality or audio format\n'
-        '3. Wait for download to complete\n'
-        '4. Receive file or Gofile link\n\n'
-        '⚠️ *Note*: Large files will be uploaded to Gofile'
+        "*📋 How to use:*\n"
+        "1. Send `/download` command with YouTube URL\n"
+        "2. Select video quality or audio format\n"
+        "3. Wait for download to complete\n"
+        "4. Receive file or Gofile link\n\n"
+        "*⚠️ Note:* Large files will be uploaded to Gofile"
     )
     
-    await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
+    try:
+        await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
+    except BadRequest as e:
+        logger.error(f"Failed to send help message: {e}")
+        # Fallback without markdown if parsing fails
+        await update.message.reply_text(help_text.replace('*', '').replace('`', ''))
 
 @restricted
 async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
