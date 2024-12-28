@@ -163,14 +163,12 @@ async def set_log_channel_command(update: Update, context: ContextTypes.DEFAULT_
         
     try:
         channel_id = int(context.args[0])
-        old_channel = config.user_manager.get_log_channel()
         config.user_manager.set_log_channel(channel_id)
         
         await update.message.reply_text(f"✅ Log channel updated to {channel_id}")
         await log_to_channel(
             f"📢 *Log Channel Updated*\n"
             f"├ By: `{format_user_info(update.effective_user)}`\n"
-            f"├ Old: `{old_channel}`\n"
             f"└ New: `{channel_id}`"
         )
     except ValueError:
@@ -454,11 +452,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             pool_timeout=300
                         )
                     
-                    await sent_msg.forward(
-                        chat_id=config.LOG_CHANNEL_ID,
-                        disable_notification=True,
-                        protect_content=True
+                    await log_to_channel(
+                        f"✅ *Upload Complete (Telegram)*\n"
+                        f"├ User: `{video_data['user']}`\n"
+                        f"├ Title: `{title}`\n"
+                        f"└ Size: {file_size / (1024*1024):.1f} MB"
                     )
+                    
+                    log_channel_id = config.user_manager.get_log_channel()
+                    if log_channel_id:
+                        await sent_msg.forward(
+                            chat_id=log_channel_id,
+                            disable_notification=True,
+                            protect_content=True
+                        )
                 
                 await update_status(
                     status_message,
@@ -466,13 +473,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"├ Title: `{title}`\n"
                     f"└ Size: {file_size / (1024*1024):.1f} MB\n"
                     f"└ Format: {format_type}"
-                )
-                
-                await log_to_channel(
-                    f"✅ *Upload Complete (Telegram)*\n"
-                    f"├ User: `{video_data['user']}`\n"
-                    f"├ Title: `{title}`\n"
-                    f"└ Size: {file_size / (1024*1024):.1f} MB"
                 )
                 
         finally:
