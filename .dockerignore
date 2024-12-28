@@ -1,0 +1,8 @@
+.git
+__pycache__
+venv
+*.pyc
+.DS_Store
+data
+downloads
+cookies
