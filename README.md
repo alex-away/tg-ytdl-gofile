@@ -18,12 +18,49 @@ A Telegram bot that downloads YouTube videos and audio with advanced features an
 
 ### Using Docker (Recommended)
 
-1. Clone the repository
-2. Copy `.env.example` to `.env` and configure it
-3. Build and run the Docker container:
+1. Clone the repository:
 ```bash
+git clone https://github.com/yourusername/yt-tg-bot.git
+cd yt-tg-bot
+```
+
+2. Set up environment variables:
+```bash
+# Copy the example env file
+cp .env.example .env
+
+# Edit .env with your configuration
+# REQUIRED:
+# - BOT_TOKEN=your_telegram_bot_token
+# - SUDO_USERS=your_telegram_user_id
+```
+
+3. Build and run using Docker:
+```bash
+# Build the image
 docker build -t yt-tg-bot .
+
+# Run with environment variables from .env
 docker run -d --name yt-tg-bot --env-file .env yt-tg-bot
+
+# Or run with manual environment variables
+docker run -d --name yt-tg-bot \
+    -e BOT_TOKEN=your_telegram_bot_token \
+    -e SUDO_USERS=your_telegram_user_id \
+    -e GOFILE_API_KEY=optional_gofile_key \
+    yt-tg-bot
+
+# View logs
+docker logs -f yt-tg-bot
+```
+
+4. Verify the bot is running:
+```bash
+# Check container status
+docker ps
+
+# Check container logs for any errors
+docker logs yt-tg-bot
 ```
 
 ### Manual Setup
