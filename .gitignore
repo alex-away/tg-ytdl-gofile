@@ -1,0 +1,25 @@
+# Virtual Environment
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment variables
+.env
+
+# Downloaded files
+downloads/
+
+# Logs
+*.log
+
+# IDE specific files
+.vscode/
+.idea/
+
+# Cookie files
+*.cookies
+cookies/ 
