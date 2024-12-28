@@ -22,7 +22,7 @@ class GoFileUploader:
         self._session: Optional[aiohttp.ClientSession] = None
         self._max_retries = 3
         self._retry_delays = [1, 2, 4]  # Exponential backoff
-        self._default_servers = ["srv-store1", "srv-store2", "srv-store3", "srv-store4", "srv-store5"]
+        self._default_servers = ["store1", "store2", "store3", "store4", "store5"]
 
         if self._api_token:
             logger.info("Initialized GoFile uploader with API token")
@@ -45,7 +45,8 @@ class GoFileUploader:
             connector = TCPConnector(
                 force_close=True,
                 enable_cleanup_closed=True,
-                ttl_dns_cache=300
+                ttl_dns_cache=300,
+                verify_ssl=False  # Some Gofile servers have SSL issues
             )
             timeout = aiohttp.ClientTimeout(
                 total=3600,     # 1 hour total timeout
@@ -76,20 +77,24 @@ class GoFileUploader:
 
         for attempt, delay in enumerate(self._retry_delays):
             try:
+                # Try new API endpoint first
                 async with self._session.get(
-                    f"{self._base_url}/getServer",
+                    f"{self._base_url}/accounts/servers",
                     headers=headers,
-                    timeout=10  # Shorter timeout for server check
+                    timeout=10
                 ) as response:
+                    logger.info(f"Server response status: {response.status}")
+                    text = await response.text()
+                    logger.info(f"Server response: {text[:200]}...")  # Log first 200 chars
+
                     if response.status == 200:
                         data = await response.json()
-                        if data.get("status") == "ok":
-                            server = data.get("data", {}).get("server")
-                            if server:
-                                logger.info(f"Got upload server from API: {server}")
-                                return server
+                        if data.get("status") == "ok" and data.get("data"):
+                            server = data["data"][0]
+                            logger.info(f"Got upload server from API: {server}")
+                            return server
 
-                    # If API call fails, try each default server
+                    # If API call fails, test each default server
                     for server in self._default_servers:
                         try:
                             # Test connection to server
@@ -98,18 +103,20 @@ class GoFileUploader:
                                 headers=headers,
                                 timeout=5
                             ) as test_response:
-                                if test_response.status == 200 or test_response.status == 404:
+                                if test_response.status in [200, 404]:
                                     logger.info(f"Using fallback server: {server}")
                                     return server
-                        except Exception:
+                        except Exception as e:
+                            logger.warning(f"Failed to connect to {server}: {str(e)}")
                             continue
 
-                    raise Exception("No working servers found")
+                    # If all servers fail, use first default server
+                    logger.warning("All servers failed, using first default server")
+                    return self._default_servers[0]
 
             except Exception as e:
                 logger.error(f"Server fetch attempt {attempt + 1} failed: {str(e)}")
                 if attempt == len(self._retry_delays) - 1:
-                    # Last attempt, try one more time with first default server
                     logger.warning("All server fetch attempts failed, using first default server")
                     return self._default_servers[0]
                 await asyncio.sleep(delay)
@@ -171,10 +178,14 @@ class GoFileUploader:
                 async with self._session.post(
                     f"https://{server}.gofile.io/uploadFile",
                     data=form,
-                    headers=headers
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=300)  # 5 minutes timeout for upload
                 ) as response:
+                    logger.info(f"Upload response status: {response.status}")
+                    text = await response.text()
+                    logger.info(f"Upload response: {text[:200]}...")  # Log first 200 chars
+
                     if response.status != 200:
-                        text = await response.text()
                         raise Exception(f"Upload failed with status {response.status}: {text}")
 
                     result = await response.json()
@@ -196,6 +207,14 @@ class GoFileUploader:
                         "file_name": file_name,
                         "direct_link": data.get("directLink", "")
                     }
+
+            except asyncio.TimeoutError:
+                logger.error(f"Timeout uploading {file_name} - file may be too large")
+                if file:
+                    file.close()
+                if attempt == len(self._retry_delays) - 1:
+                    raise Exception("Upload timed out - file may be too large")
+                continue
 
             except Exception as e:
                 logger.error(f"Upload attempt {attempt + 1} failed: {str(e)}")
