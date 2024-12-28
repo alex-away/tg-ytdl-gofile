@@ -1,3 +1,4 @@
 python-telegram-bot
 yt-dlp
+python-dotenv
 gofile2 

@@ -16,6 +16,8 @@ class DownloadProgress:
         self.start_time = time.time()
         self.last_update = 0
         self.last_progress = 0
+        self.last_size = 0
+        self.update_interval = 1.0  # Update every second
 
     async def _safe_callback(self, text: str):
         try:
@@ -26,7 +28,7 @@ class DownloadProgress:
     def progress_hook(self, d: Dict):
         try:
             current_time = time.time()
-            if current_time - self.last_update < 2:
+            if current_time - self.last_update < self.update_interval:
                 return
             
             if d['status'] == 'downloading':
@@ -35,35 +37,41 @@ class DownloadProgress:
                 
                 if total:
                     progress = (downloaded / total) * 100
-                    if abs(progress - self.last_progress) < 5:
-                        return
-                    self.last_progress = progress
+                    size_change = abs(downloaded - self.last_size) / (1024 * 1024)  # MB
                     
-                    speed = d.get('speed', 0)
-                    eta = (total - downloaded) / speed if speed else 0
+                    # Only update if progress changed by 1% or size changed by 1MB
+                    if (abs(progress - self.last_progress) >= 1 or size_change >= 1):
+                        self.last_progress = progress
+                        self.last_size = downloaded
+                        
+                        speed = d.get('speed', 0)
+                        eta = (total - downloaded) / speed if speed else 0
 
-                    progress_bar = self._get_progress_bar(progress)
-                    status = (
-                        f"📥 *Downloading*\n"
-                        f"{progress_bar} `{progress:.1f}%`\n"
-                        f"├ Size: {self._format_size(downloaded)}/{self._format_size(total)}\n"
-                        f"├ Speed: {self._format_size(speed)}/s\n"
-                        f"└ ETA: {self._format_time(eta)}"
-                    )
+                        progress_bar = self._get_progress_bar(progress)
+                        status = (
+                            f"📥 *Downloading*\n"
+                            f"{progress_bar} `{progress:.1f}%`\n"
+                            f"├ Size: {self._format_size(downloaded)}/{self._format_size(total)}\n"
+                            f"├ Speed: {self._format_size(speed)}/s\n"
+                            f"└ ETA: {self._format_time(eta)}"
+                        )
                 else:
-                    status = (
-                        f"📥 *Downloading*\n"
-                        f"└ Downloaded: {self._format_size(downloaded)}"
-                    )
+                    # For downloads without size info
+                    if downloaded - self.last_size >= 1024 * 1024:  # 1MB change
+                        self.last_size = downloaded
+                        status = (
+                            f"📥 *Downloading*\n"
+                            f"└ Downloaded: {self._format_size(downloaded)}"
+                        )
+                    else:
+                        return
                 
+                self.last_update = current_time
                 future = asyncio.run_coroutine_threadsafe(
                     self._safe_callback(status), 
                     self.loop
                 )
-                try:
-                    future.result(timeout=1)
-                except:
-                    pass
+                future.result(timeout=0.5)  # Shorter timeout
                 
             elif d['status'] == 'finished':
                 self.last_update = current_time
@@ -71,13 +79,10 @@ class DownloadProgress:
                     self._safe_callback("⚙️ Processing download..."), 
                     self.loop
                 )
-                try:
-                    future.result(timeout=1)
-                except:
-                    pass
+                future.result(timeout=0.5)
                 
-        except Exception:
-            pass
+        except (asyncio.TimeoutError, Exception):
+            pass  # Silently handle timeouts and other errors
 
     def _get_progress_bar(self, percentage: float, length: int = 15) -> str:
         filled = int(length * percentage / 100)

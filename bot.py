@@ -3,9 +3,10 @@ import logging
 import re
 import os
 import time
+import signal
 from functools import wraps
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
+from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
 from telegram.constants import ParseMode
 from telegram.error import TimedOut, RetryAfter
 
@@ -14,17 +15,20 @@ from utils.youtube import YouTubeDownloader
 from utils.gofile import GoFileUploader
 
 logging.basicConfig(
-    format='%(levelname)-8s %(message)s',
-    level=logging.WARNING
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
 video_info_cache = {}
 last_update_time = {}
 bot = None
+upload_progress = {}
+
+def format_user_info(user) -> str:
+    return f"{user.first_name} (@{user.username})" if user.username else f"{user.first_name} ({user.id})"
 
 async def log_to_channel(text: str):
-    """Send log message to the configured channel."""
     if not config.LOG_CHANNEL_ID or not bot:
         return
     try:
@@ -37,7 +41,6 @@ async def log_to_channel(text: str):
         logger.error(f"Failed to send log to channel: {e}")
 
 async def update_status(message, text: str, keyboard=None):
-    """Update status message with rate limiting."""
     message_id = f"{message.chat_id}_{message.message_id}"
     current_time = time.time()
     
@@ -58,25 +61,128 @@ async def update_status(message, text: str, keyboard=None):
     except TimedOut:
         pass
     except Exception as e:
-        logger.error(f"Error updating status: {str(e)}")
+        logger.error(f"Error updating status: {e}")
 
-def restricted(func):
-    """Decorator to restrict bot usage to allowed users."""
-    @wraps(func)
-    async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
-        user_id = update.effective_user.id
-        if user_id not in config.ALLOWED_USERS:
-            logger.warning(f"Unauthorized access denied for {user_id}")
-            await update.message.reply_text("🚫 Sorry, you are not authorized to use this bot.")
+def restricted(sudo_only=False):
+    def decorator(func):
+        @wraps(func)
+        async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+            user_id = update.effective_user.id
+            user_info = format_user_info(update.effective_user)
+            command = update.message.text.split()[0] if update.message.text else "unknown"
+            
+            if sudo_only and user_id not in config.SUDO_USERS:
+                logger.warning(f"Sudo access denied for {user_info}")
+                await log_to_channel(
+                    f"⚠️ *Unauthorized Sudo Access Attempt*\n"
+                    f"├ User: `{user_info}`\n"
+                    f"└ Command: `{command}`"
+                )
+                await update.message.reply_text("🚫 This command is only available to sudo users.")
+                return
+            
+            if not config.user_manager.is_allowed(user_id):
+                logger.warning(f"Access denied for {user_info}")
+                await log_to_channel(
+                    f"⚠️ *Unauthorized Bot Access Attempt*\n"
+                    f"├ User: `{user_info}`\n"
+                    f"└ Command: `{command}`"
+                )
+                await update.message.reply_text("🚫 You are not authorized to use this bot.")
+                return
+                
+            return await func(update, context, *args, **kwargs)
+        return wrapped
+    return decorator
+
+@restricted(sudo_only=True)
+async def add_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("❌ Please provide a user ID to add.")
+        return
+        
+    try:
+        user_id = int(context.args[0])
+        if config.user_manager.add_user(user_id):
+            await update.message.reply_text(f"✅ User {user_id} added successfully.")
+            await log_to_channel(
+                f"👥 *User Added*\n"
+                f"├ By: `{format_user_info(update.effective_user)}`\n"
+                f"└ Added: `{user_id}`"
+            )
+        else:
+            await update.message.reply_text(f"ℹ️ User {user_id} is already in the allowed list.")
+    except ValueError:
+        await update.message.reply_text("❌ Invalid user ID format.")
+
+@restricted(sudo_only=True)
+async def remove_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("❌ Please provide a user ID to remove.")
+        return
+        
+    try:
+        user_id = int(context.args[0])
+        if user_id in config.SUDO_USERS:
+            await update.message.reply_text("❌ Cannot remove a sudo user.")
             return
-        return await func(update, context, *args, **kwargs)
-    return wrapped
+            
+        if config.user_manager.remove_user(user_id):
+            await update.message.reply_text(f"✅ User {user_id} removed successfully.")
+            await log_to_channel(
+                f"👥 *User Removed*\n"
+                f"├ By: `{format_user_info(update.effective_user)}`\n"
+                f"└ Removed: `{user_id}`"
+            )
+        else:
+            await update.message.reply_text(f"ℹ️ User {user_id} is not in the allowed list.")
+    except ValueError:
+        await update.message.reply_text("❌ Invalid user ID format.")
 
-@restricted
+@restricted(sudo_only=True)
+async def list_users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    sudo_users = config.SUDO_USERS
+    allowed_users = config.user_manager.get_users()
+    
+    message = (
+        "👥 *User List*\n\n"
+        "*Sudo Users*:\n"
+        + "\n".join([f"└ `{uid}`" for uid in sudo_users])
+        + "\n\n*Allowed Users*:\n"
+        + "\n".join([f"└ `{uid}`" for uid in allowed_users])
+    )
+    
+    await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+
+@restricted(sudo_only=True)
+async def set_log_channel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("❌ Please provide a channel ID.")
+        return
+        
+    try:
+        channel_id = int(context.args[0])
+        old_channel = config.LOG_CHANNEL_ID
+        config.LOG_CHANNEL_ID = channel_id
+        
+        await update.message.reply_text(f"✅ Log channel updated to {channel_id}")
+        await log_to_channel(
+            f"📢 *Log Channel Updated*\n"
+            f"├ By: `{format_user_info(update.effective_user)}`\n"
+            f"├ Old: `{old_channel}`\n"
+            f"└ New: `{channel_id}`"
+        )
+    except ValueError:
+        await update.message.reply_text("❌ Invalid channel ID format.")
+
+@restricted()
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Send a message when the command /start is issued."""
     user = update.effective_user
-    await update.message.reply_text(
+    user_info = format_user_info(user)
+    
+    await log_to_channel(f"🤖 *Bot Started*\n└ User: `{user_info}`")
+    
+    help_text = (
         f'👋 Hi {user.first_name}!\n\n'
         '🎥 I can help you download YouTube videos and audio.\n'
         '📝 Use /help to see available commands.\n\n'
@@ -87,15 +193,32 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         '• Progress tracking\n'
         '• Cookie support for restricted videos'
     )
+    
+    if user.id in config.SUDO_USERS:
+        help_text += '\n\n🔑 You have sudo access to this bot.'
+    
+    await update.message.reply_text(help_text)
 
-@restricted
+@restricted()
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Send a message when the command /help is issued."""
+    user_id = update.effective_user.id
     help_text = (
         '🎥 *Available Commands*:\n\n'
         '▶️ /start - Start the bot\n'
         '❓ /help - Show this help message\n'
         '⬇️ /download <url> - Download YouTube video\n\n'
+    )
+    
+    if user_id in config.SUDO_USERS:
+        help_text += (
+            '*Sudo Commands*:\n'
+            '👥 /adduser <user_id> - Add allowed user\n'
+            '👥 /removeuser <user_id> - Remove allowed user\n'
+            '👥 /listusers - List all users\n'
+            '📢 /setlogchannel <channel_id> - Set log channel\n\n'
+        )
+    
+    help_text += (
         '📋 *How to use*:\n'
         '1. Send /download command with YouTube URL\n'
         '2. Select video quality or audio format\n'
@@ -103,6 +226,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         '4. Receive file or Gofile link\n\n'
         '⚠️ *Note*: Large files will be uploaded to Gofile'
     )
+    
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
 @restricted
@@ -181,7 +305,7 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"├ Channel: {info['author']}\n"
             f"├ Duration: {duration_min}:{duration_sec:02d}\n"
             f"└ Views: {views_formatted}\n\n"
-            f"🎯 Select format to download:",
+            f"���� Select format to download:",
             InlineKeyboardMarkup(keyboard)
         )
 
@@ -336,20 +460,41 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error in button callback: {error_msg}")
         await update_status(query.message, f"❌ *Error*\n└ {error_msg}")
         await log_to_channel(
-            f"❌ *Download Error*\n"
+            f"�� *Download Error*\n"
             f"└ Error: `{error_msg}`"
         )
 
+async def shutdown():
+    """Perform graceful shutdown."""
+    try:
+        await log_to_channel(
+            "🔴 *Bot Shutting Down*\n"
+            "└ Graceful shutdown initiated"
+        )
+    except Exception as e:
+        logger.error(f"Failed to send shutdown log: {e}")
+    finally:
+        logger.info("Bot shutting down...")
+        os._exit(0)
+
+def signal_handler(signum, frame):
+    """Handle shutdown signals."""
+    loop = asyncio.get_running_loop()
+    loop.create_task(shutdown())
+
 def main():
-    """Start the bot."""
     global bot
     
     application = Application.builder().token(config.BOT_TOKEN).build()
     bot = application.bot
     
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
     try:
-        asyncio.get_event_loop().run_until_complete(log_to_channel(
-            "🤖 *Bot Started*\n"
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(log_to_channel(
+            "🟢 *Bot Started*\n"
             "└ Ready to process requests"
         ))
     except Exception as e:
@@ -358,8 +503,13 @@ def main():
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("download", download_command))
+    application.add_handler(CommandHandler("adduser", add_user_command))
+    application.add_handler(CommandHandler("removeuser", remove_user_command))
+    application.add_handler(CommandHandler("listusers", list_users_command))
+    application.add_handler(CommandHandler("setlogchannel", set_log_channel_command))
     application.add_handler(CallbackQueryHandler(button_callback))
 
+    logger.info("Bot started successfully")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
