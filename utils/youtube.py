@@ -16,44 +16,60 @@ class DownloadProgress:
         self.start_time = time.time()
         self.last_update = 0
 
+    async def _safe_callback(self, text: str):
+        try:
+            await self.callback(text)
+        except Exception:
+            pass
+
     def progress_hook(self, d: Dict):
-        if d['status'] == 'downloading':
+        try:
             current_time = time.time()
             if current_time - self.last_update < 0.5:
                 return
             
             self.last_update = current_time
             
-            if d.get('total_bytes'):
+            if d['status'] == 'downloading':
                 downloaded = d.get('downloaded_bytes', 0)
-                total = d['total_bytes']
-                speed = d.get('speed', 0)
-                progress = (downloaded / total) * 100
+                total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
                 
-                if speed:
-                    eta = (total - downloaded) / speed
+                if total:
+                    speed = d.get('speed', 0)
+                    progress = (downloaded / total) * 100
+                    eta = (total - downloaded) / speed if speed else 0
+
+                    progress_bar = self._get_progress_bar(progress)
+                    status = (
+                        f"📥 *Downloading*\n"
+                        f"{progress_bar} `{progress:.1f}%`\n"
+                        f"├ Size: {self._format_size(downloaded)}/{self._format_size(total)}\n"
+                        f"├ Speed: {self._format_size(speed)}/s\n"
+                        f"└ ETA: {self._format_time(eta)}"
+                    )
                 else:
-                    eta = 0
-
-                progress_bar = self._get_progress_bar(progress)
-                status = (
-                    f"📥 *Downloading*\n"
-                    f"{progress_bar} `{progress:.1f}%`\n"
-                    f"├ Size: {self._format_size(downloaded)}/{self._format_size(total)}\n"
-                    f"├ Speed: {self._format_size(speed)}/s\n"
-                    f"└ ETA: {self._format_time(eta)}"
+                    status = (
+                        f"📥 *Downloading*\n"
+                        f"└ Downloaded: {self._format_size(downloaded)}"
+                    )
+                
+                future = asyncio.run_coroutine_threadsafe(
+                    self._safe_callback(status), 
+                    self.loop
                 )
-            else:
-                status = (
-                    f"📥 *Downloading*\n"
-                    f"└ Downloaded: {self._format_size(d.get('downloaded_bytes', 0))}"
+                future.result(timeout=5)
+                
+            elif d['status'] == 'finished':
+                future = asyncio.run_coroutine_threadsafe(
+                    self._safe_callback("⚙️ Processing download..."), 
+                    self.loop
                 )
-            
-            asyncio.run_coroutine_threadsafe(self.callback(status), self.loop)
-        elif d['status'] == 'finished':
-            asyncio.run_coroutine_threadsafe(self.callback("⚙️ Processing download..."), self.loop)
+                future.result(timeout=5)
+                
+        except Exception as e:
+            print(f"Progress error: {str(e)}")
 
-    def _get_progress_bar(self, percentage: float, length: int = 10) -> str:
+    def _get_progress_bar(self, percentage: float, length: int = 15) -> str:
         filled = int(length * percentage / 100)
         return f"{'█' * filled}{'░' * (length - filled)}"
 
@@ -83,6 +99,8 @@ class YouTubeDownloader:
             'quiet': True,
             'no_warnings': True,
             'extract_flat': False,
+            'format': 'bestvideo*+bestaudio/best',
+            'merge_output_format': 'mp4'
         }
         self._executor = ThreadPoolExecutor(max_workers=config.MAX_CONCURRENT_DOWNLOADS)
 
@@ -101,7 +119,9 @@ class YouTubeDownloader:
     def get_video_info(self, url: str) -> Dict:
         ydl_opts = {
             **self.base_opts,
-            'format': 'best'
+            'format': 'best',
+            'youtube_include_dash_manifest': True,
+            'check_formats': True
         }
         
         try:
@@ -112,6 +132,9 @@ class YouTubeDownloader:
                 
                 video_id = self._get_video_id(url)
                 formats = self._parse_formats(info.get('formats', []))
+                
+                if not formats['video'] and not formats['audio']:
+                    raise Exception("No supported formats found")
                 
                 return {
                     'title': info.get('title', 'Unknown Title'),
@@ -126,56 +149,95 @@ class YouTubeDownloader:
         except Exception as e:
             raise Exception(f"Error getting video info: {str(e)}")
 
-    def _parse_formats(self, formats: List[Dict]) -> Dict[str, List[Dict]]:
+    def _parse_formats(self, formats: List[Dict]) -> Dict:
         video_formats = {}
         
         for f in formats:
-            if f.get('vcodec') != 'none' and f.get('acodec') != 'none':
-                height = f.get('height', 0)
-                if height:
-                    quality = f"{height}p"
-                    if quality in config.SUPPORTED_VIDEO_QUALITIES:
-                        ext = f.get('ext', 'mp4')
-                        if ext not in ['mp4', 'webm', 'mkv']:
-                            continue
-                            
-                        if quality not in video_formats:
-                            video_formats[quality] = {}
-                        if ext not in video_formats[quality]:
-                            video_formats[quality][ext] = []
-                            
-                        video_formats[quality][ext].append({
-                            'format_id': f['format_id'],
-                            'ext': ext,
-                            'filesize': f.get('filesize', 0),
-                            'tbr': f.get('tbr', 0),
-                            'vcodec': f.get('vcodec', ''),
-                            'acodec': f.get('acodec', '')
-                        })
+            if not f:
+                continue
+                
+            height = f.get('height', 0)
+            ext = f.get('ext', '')
+            vcodec = f.get('vcodec', '')
+            acodec = f.get('acodec', '')
+            filesize = f.get('filesize', 0)
+            tbr = f.get('tbr', 0)
+            
+            if not height or not ext or not vcodec or not acodec:
+                continue
+            
+            if vcodec != 'none' and acodec != 'none':
+                quality = f"{height}p"
+                if quality in config.SUPPORTED_VIDEO_QUALITIES:
+                    if ext not in ['mp4', 'webm', 'mkv']:
+                        continue
+                        
+                    if quality not in video_formats:
+                        video_formats[quality] = {}
+                    if ext not in video_formats[quality]:
+                        video_formats[quality][ext] = []
+                        
+                    video_formats[quality][ext].append({
+                        'format_id': f['format_id'],
+                        'ext': ext,
+                        'filesize': filesize,
+                        'tbr': tbr,
+                        'vcodec': vcodec,
+                        'acodec': acodec
+                    })
 
         for quality in video_formats:
             for ext in video_formats[quality]:
-                video_formats[quality][ext].sort(key=lambda x: (x.get('tbr', 0), x.get('filesize', 0)), reverse=True)
+                video_formats[quality][ext].sort(
+                    key=lambda x: (
+                        float(x.get('tbr', 0) or 0),
+                        float(x.get('filesize', 0) or 0),
+                        bool(x.get('vcodec', '').startswith('avc1')),
+                        bool(x.get('acodec', '').startswith('mp4a'))
+                    ),
+                    reverse=True
+                )
+
+        audio_formats = {'mp3': [], 'wav': []}
+        audio_only = [f for f in formats if f and f.get('vcodec') == 'none' and f.get('acodec') != 'none']
+        
+        if audio_only:
+            best_audio = max(
+                audio_only,
+                key=lambda x: (
+                    float(x.get('abr', 0) or 0),
+                    float(x.get('filesize', 0) or 0),
+                    bool(x.get('acodec', '').startswith('mp4a'))
+                )
+            )
+            
+            for fmt in ['mp3', 'wav']:
+                audio_formats[fmt].append({
+                    'format_id': best_audio['format_id'],
+                    'ext': fmt,
+                    'filesize': best_audio.get('filesize', 0),
+                    'abr': best_audio.get('abr', 0)
+                })
 
         return {
             'video': video_formats,
-            'audio': {
-                'mp3': [{'format_id': 'bestaudio/best', 'ext': 'mp3'}],
-                'wav': [{'format_id': 'bestaudio/best', 'ext': 'wav'}]
-            }
+            'audio': audio_formats
         }
 
     async def download(self, url: str, format_type: str, format_quality: str, format_ext: str, progress_callback: Callable[[str], None]) -> Tuple[str, str]:
         loop = asyncio.get_event_loop()
         progress = DownloadProgress(progress_callback, loop)
         
-        ydl_opts = {
-            **self.base_opts,
-            'progress_hooks': [progress.progress_hook],
-            'outtmpl': os.path.join(config.TEMP_PATH, '%(title)s.%(ext)s'),
-        }
-
         try:
+            await progress_callback("🔍 Preparing download...")
+            
+            ydl_opts = {
+                **self.base_opts,
+                'progress_hooks': [progress.progress_hook],
+                'outtmpl': os.path.join(config.TEMP_PATH, '%(title)s.%(ext)s'),
+                'retries': 3
+            }
+
             if format_type == 'audio':
                 ydl_opts.update({
                     'format': 'bestaudio/best',
@@ -186,8 +248,14 @@ class YouTubeDownloader:
                     }]
                 })
             else:
+                format_str = (
+                    f'bestvideo[height={format_quality[:-1]}][ext={format_ext}]'
+                    f'+bestaudio[ext={format_ext}]'
+                    f'/best[height<={format_quality[:-1]}][ext={format_ext}]'
+                )
                 ydl_opts.update({
-                    'format': f'bestvideo[height={format_quality[:-1]}][ext={format_ext}]+bestaudio/best[height<={format_quality[:-1]}][ext={format_ext}]'
+                    'format': format_str,
+                    'merge_output_format': format_ext
                 })
 
             result = await loop.run_in_executor(
@@ -198,13 +266,16 @@ class YouTubeDownloader:
             )
             
             if not result:
-                raise Exception("Download failed")
+                raise Exception("Download failed - please try again")
             
             filename, title = result
+            if not os.path.exists(filename):
+                raise Exception("Download completed but file not found")
+                
             return filename, title
 
         except Exception as e:
-            raise Exception(f"Error downloading: {str(e)}")
+            raise Exception(f"Download error: {str(e)}")
 
     def _download(self, url: str, ydl_opts: Dict) -> Optional[Tuple[str, str]]:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
