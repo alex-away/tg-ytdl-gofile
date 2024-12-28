@@ -376,31 +376,56 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             progress_callback
         )
 
+        await log_to_channel(
+            f"✅ *Download Complete*\n"
+            f"├ User: `{video_data['user']}`\n"
+            f"├ Title: `{title}`\n"
+            f"└ Size: {downloader.get_file_size(filename) / (1024*1024):.1f} MB"
+        )
+
         file_size = downloader.get_file_size(filename)
         
         try:
-            if file_size > (config.MAX_DOWNLOAD_SIZE * 1024 * 1024):
-                await progress_callback("📤 File too large for Telegram. Uploading to Gofile...")
-                
-                gofile = GoFileUploader()
-                result = await gofile.upload_file(filename, progress_callback)
-                
-                final_text = (
-                    f"✅ *Download Complete*\n"
-                    f"├ Title: `{title}`\n"
-                    f"├ Size: {file_size / (1024*1024):.1f} MB\n"
-                    f"├ Format: {format_type}\n"
-                    f"└ [Download from Gofile]({result['download_link']})\n\n"
-                    f"⚠️ Note: Link expires after some time"
-                )
-                await update_status(status_message, final_text)
-                
+            if file_size > (config.MAX_DOWNLOAD_SIZE * 1024 * 1024) or config.FORCE_GOFILE:
                 await log_to_channel(
-                    f"✅ *Upload Complete (Gofile)*\n"
+                    f"📤 *Upload Started (Gofile)*\n"
                     f"├ User: `{video_data['user']}`\n"
                     f"├ Title: `{title}`\n"
                     f"└ Size: {file_size / (1024*1024):.1f} MB"
                 )
+                await progress_callback("📤 File will be uploaded to Gofile...")
+                
+                try:
+                    async with GoFileUploader() as gofile:
+                        result = await gofile.upload_file(filename, progress_callback)
+                    
+                    final_text = (
+                        f"✅ *Download Complete*\n"
+                        f"├ Title: `{title}`\n"
+                        f"├ Size: {file_size / (1024*1024):.1f} MB\n"
+                        f"├ Format: {format_type}\n"
+                        f"└ [Download from Gofile]({result['download_link']})\n\n"
+                        f"⚠️ Note: Link expires after some time"
+                    )
+                    await update_status(status_message, final_text)
+                    
+                    await log_to_channel(
+                        f"✅ *Upload Complete (Gofile)*\n"
+                        f"├ User: `{video_data['user']}`\n"
+                        f"├ Title: `{title}`\n"
+                        f"└ Size: {file_size / (1024*1024):.1f} MB"
+                    )
+                except Exception as e:
+                    error_msg = str(e)
+                    logger.error(f"Gofile upload error: {error_msg}")
+                    await update_status(status_message, f"❌ *Upload Failed*\n└ Error: {error_msg}")
+                    await log_to_channel(
+                        f"❌ *Upload Error*\n"
+                        f"├ User: `{video_data['user']}`\n"
+                        f"├ Title: `{title}`\n"
+                        f"└ Error: `{error_msg}`"
+                    )
+                    raise
                 
             else:
                 await progress_callback("📤 Uploading to Telegram...")
@@ -523,36 +548,49 @@ def main():
             try:
                 await bot.set_my_commands(
                     sudo_commands,
-                    scope=BotCommandScope.CHAT(sudo_id)
+                    scope=BotCommandScope.Chat(chat_id=sudo_id)
                 )
             except Exception as e:
                 logger.error(f"Failed to set sudo commands for {sudo_id}: {e}")
+
+    async def startup():
+        await log_to_channel(
+            "🟢 *Bot Started*\n"
+            "└ Ready to process requests"
+        )
+        await set_commands()
     
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
     try:
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(log_to_channel(
-            "🟢 *Bot Started*\n"
-            "└ Ready to process requests"
+        # Create and set event loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # Run startup tasks
+        loop.run_until_complete(startup())
+        
+        # Add handlers
+        application.add_handler(CommandHandler("start", start_command))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(CommandHandler("download", download_command))
+        application.add_handler(CommandHandler("adduser", add_user_command))
+        application.add_handler(CommandHandler("removeuser", remove_user_command))
+        application.add_handler(CommandHandler("listusers", list_users_command))
+        application.add_handler(CommandHandler("setlogchannel", set_log_channel_command))
+        application.add_handler(CallbackQueryHandler(button_callback))
+        application.add_handler(MessageHandler(
+            filters.TEXT & filters.Regex(r'https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)[\w-]+'),
+            download_command
         ))
-        loop.run_until_complete(set_commands())
+
+        logger.info("Bot started successfully")
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
+        
     except Exception as e:
-        logger.error(f"Failed to send startup message or set commands: {e}")
-
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("download", download_command))
-    application.add_handler(CommandHandler("adduser", add_user_command))
-    application.add_handler(CommandHandler("removeuser", remove_user_command))
-    application.add_handler(CommandHandler("listusers", list_users_command))
-    application.add_handler(CommandHandler("setlogchannel", set_log_channel_command))
-    application.add_handler(CallbackQueryHandler(button_callback))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)[\w-]+'), download_command))
-
-    logger.info("Bot started successfully")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+        logger.error(f"Failed to start bot: {e}")
+        raise
 
 if __name__ == '__main__':
     main() 

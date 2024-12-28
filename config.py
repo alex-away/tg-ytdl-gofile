@@ -103,6 +103,7 @@ user_manager = UserManager()
 MAX_DOWNLOAD_SIZE = int(os.getenv('MAX_DOWNLOAD_SIZE', 2048))
 MAX_CONCURRENT_DOWNLOADS = int(os.getenv('MAX_CONCURRENT_DOWNLOADS', 2))
 GOFILE_API_KEY = os.getenv('GOFILE_API_KEY')
+FORCE_GOFILE = os.getenv('FORCE_GOFILE', '').lower() == 'true'
 
 SUPPORTED_AUDIO_FORMATS = ['mp3', 'wav']
 SUPPORTED_VIDEO_QUALITIES = ['144p', '240p', '360p', '480p', '720p', '1080p', '1440p', '2160p']
