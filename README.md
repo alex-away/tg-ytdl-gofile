@@ -149,3 +149,35 @@ Optional settings:
 - Python 3.12 or higher
 - FFmpeg (for audio conversion)
 - Internet connection for YouTube downloads and GoFile uploads 
+
+### Installing FFmpeg
+
+#### Windows
+1. Download FFmpeg from the official website: https://ffmpeg.org/download.html#build-windows
+2. Extract the downloaded zip file
+3. Add FFmpeg to your system PATH:
+   - Copy the path to the `bin` folder (e.g., `C:\ffmpeg\bin`)
+   - Open System Properties → Advanced → Environment Variables
+   - Edit the `Path` variable and add the FFmpeg bin path
+   - Restart your terminal/command prompt
+
+#### Linux (Debian/Ubuntu)
+```bash
+sudo apt update
+sudo apt install ffmpeg
+```
+
+#### Linux (Fedora)
+```bash
+sudo dnf install ffmpeg
+```
+
+#### macOS (using Homebrew)
+```bash
+brew install ffmpeg
+```
+
+To verify FFmpeg installation, run:
+```bash
+ffmpeg -version
+``` 

@@ -668,23 +668,44 @@ def main():
     ]
     
     async def set_commands():
-        await bot.set_my_commands(commands)
+        max_retries = 3
+        retry_delay = 5
         
-        for sudo_id in config.SUDO_USERS:
+        for attempt in range(max_retries):
             try:
-                await bot.set_my_commands(
-                    sudo_commands,
-                    scope=BotCommandScopeChat(chat_id=sudo_id)
-                )
+                await bot.set_my_commands(commands)
+                
+                for sudo_id in config.SUDO_USERS:
+                    try:
+                        await bot.set_my_commands(
+                            sudo_commands,
+                            scope=BotCommandScopeChat(chat_id=sudo_id)
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to set sudo commands for {sudo_id}: {e}")
+                        continue
+                        
+                return
+            except (TimedOut, RetryAfter) as e:
+                if attempt == max_retries - 1:
+                    logger.error(f"Failed to set commands after {max_retries} attempts")
+                    raise
+                logger.warning(f"Attempt {attempt + 1} failed, retrying in {retry_delay}s...")
+                await asyncio.sleep(retry_delay)
             except Exception as e:
-                logger.error(f"Failed to set sudo commands for {sudo_id}: {e}")
+                logger.error(f"Failed to set commands: {e}")
+                return
 
     async def startup():
-        await log_to_channel(
-            "🟢 *Bot Started*\n"
-            "└ Ready to process requests"
-        )
-        await set_commands()
+        try:
+            await set_commands()
+            await log_to_channel(
+                "🟢 *Bot Started*\n"
+                "└ Ready to process requests"
+            )
+        except Exception as e:
+            logger.error(f"Startup error: {e}")
+            pass
     
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
