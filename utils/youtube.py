@@ -155,14 +155,14 @@ class YouTubeDownloader:
         Args:
             cookie_path: Optional path to cookie file for authenticated downloads
         """
-        self.cookie_path = cookie_path or os.path.join('data', 'cookies.txt')
-        if os.path.exists(self.cookie_path):
-            logger.info(f"Using cookies from: {self.cookie_path}")
+        self.cookie_path = cookie_path
+        if cookie_path and os.path.exists(cookie_path):
+            logger.info(f"Using cookies from: {cookie_path}")
         else:
-            logger.info("No cookies found, running without authentication")
+            logger.info("Running without cookies")
             
         self.base_opts = {
-            'cookiefile': self.cookie_path if os.path.exists(self.cookie_path) else None,
+            'cookiefile': self.cookie_path if (self.cookie_path and os.path.exists(self.cookie_path)) else None,
             'noplaylist': True,
             'quiet': True,
             'no_warnings': True,
@@ -172,7 +172,15 @@ class YouTubeDownloader:
             'check_formats': True,
             'youtube_include_dash_manifest': True,
             'youtube_include_hls_manifest': True,
-            'format_sort': ['res', 'ext:mp4:m4a', 'codec:h264:m4a', 'size', 'br', 'asr']
+            'format_sort': ['res', 'ext:mp4:m4a', 'codec:h264:m4a', 'size', 'br', 'asr'],
+            'ignoreerrors': True,
+            'extract_flat': 'in_playlist',
+            'live_from_start': True,
+            'wait_for_video': 5,
+            'retries': 10,
+            'fragment_retries': 10,
+            'skip_unavailable_fragments': True,
+            'overwrites': True
         }
         self._executor = ThreadPoolExecutor(max_workers=config.MAX_CONCURRENT_DOWNLOADS)
         self._info_executor = ThreadPoolExecutor(max_workers=10)
@@ -328,9 +336,15 @@ class YouTubeDownloader:
                 **self.base_opts,
                 'progress_hooks': [progress.progress_hook],
                 'outtmpl': os.path.join(config.TEMP_PATH, '%(title)s.%(ext)s'),
-                'retries': 3,
+                'retries': 10,
                 'fragment_retries': 10,
-                'http_chunk_size': 10485760
+                'http_chunk_size': 10485760,
+                'live_from_start': True,
+                'wait_for_video': 5,
+                'concurrent_fragment_downloads': 10,
+                'hls_prefer_native': True,
+                'hls_use_mpegts': True,
+                'external_downloader_args': ['--retry-streams', '5']
             }
 
             if format_type == 'audio':

@@ -5,21 +5,111 @@ import os
 import time
 import signal
 from functools import wraps
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommandScope, BotCommandScopeChat
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommandScopeChat
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
 from telegram.constants import ParseMode
 from telegram.error import TimedOut, RetryAfter, BadRequest
 import shutil
+import colorlog
 
 import config
 from utils.youtube import YouTubeDownloader, set_youtube_cookies
 from utils.gofile import GoFileUploader
 
-logging.basicConfig(
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    level=logging.INFO
-)
+COLORS = {
+    'red': '\033[91m',
+    'green': '\033[92m',
+    'yellow': '\033[93m',
+    'blue': '\033[94m',
+    'purple': '\033[95m',
+    'cyan': '\033[96m',
+    'white': '\033[97m',
+    'grey': '\033[90m',
+    'reset': '\033[0m'
+}
+
+class UpdatesFilter(logging.Filter):
+    def filter(self, record):
+        message = record.getMessage()
+        
+        if "Initialized UserManager" in message:
+            record.msg = f"{COLORS['cyan']}Initialized UserManager{COLORS['reset']} with {COLORS['yellow']}0{COLORS['reset']} users from {COLORS['blue']}.env{COLORS['reset']}"
+            return True
+        elif "Loaded" in message and "users from file" in message:
+            record.msg = f"{COLORS['cyan']}Loaded{COLORS['reset']} {COLORS['yellow']}1{COLORS['reset']} additional users from {COLORS['blue']}file{COLORS['reset']}"
+            return True
+        elif "Loaded log channel ID" in message:
+            record.msg = f"{COLORS['cyan']}Loaded log channel ID:{COLORS['reset']} {COLORS['yellow']}-4693946728{COLORS['reset']}"
+            return True
+        elif "Application started" in message:
+            record.msg = f"{COLORS['purple']}Application started{COLORS['reset']}"
+            return True
+        elif "Bot shutting down" in message:
+            record.msg = f"{COLORS['red']}Bot shutting down...{COLORS['reset']}"
+            return True
+        
+        if "getUpdates" in message and "HTTP/1.1 200 OK" in message:
+            return False
+
+        if "HTTP Request:" in message:
+            try:
+                if "sendMessage" in message:
+                    if "log_channel_id" in message:
+                        record.msg = f"📢 {COLORS['green']}Sent log message to channel{COLORS['reset']}"
+                    else:
+                        record.msg = f"💬 {COLORS['green']}Sent response to user{COLORS['reset']}"
+                elif "editMessageText" in message:
+                    if '"text": "🎥 *YouTube Download*' in message or '"text": "📊' in message or '[download]' in message:
+                        record.msg = f"📥 {COLORS['cyan']}Download progress: {message.split('[download]')[1].strip() if '[download]' in message else 'Starting...'}{COLORS['reset']}"
+                    else:
+                        record.msg = f"✏️ {COLORS['cyan']}Updated message{COLORS['reset']}"
+                elif "sendVideo" in message:
+                    record.msg = f"🎥 {COLORS['yellow']}Sent downloaded video to user{COLORS['reset']}"
+                elif "sendAudio" in message:
+                    record.msg = f"🎵 {COLORS['yellow']}Sent downloaded audio to user{COLORS['reset']}"
+                elif "forwardMessage" in message:
+                    record.msg = f"↪️ {COLORS['blue']}Forwarded media to log channel{COLORS['reset']}"
+                elif "answerCallbackQuery" in message:
+                    record.msg = f"🔄 {COLORS['purple']}Processed format selection{COLORS['reset']}"
+                else:
+                    return False
+                
+                if "200 OK" in message:
+                    record.msg += f" {COLORS['green']}✓{COLORS['reset']}"
+                else:
+                    record.msg += f" {COLORS['red']}✗{COLORS['reset']}"
+                
+                record.args = ()
+            except Exception:
+                return False
+                
+        return True
+    
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+
+for handler in root_logger.handlers[:]:
+    root_logger.removeHandler(handler)
+
+handler = colorlog.StreamHandler()
+handler.setFormatter(colorlog.ColoredFormatter(
+    f"{COLORS['grey']}%(asctime)s{COLORS['reset']} %(log_color)s[%(levelname)s]%(reset)s %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    reset=True,
+    log_colors={
+        'DEBUG':    'cyan',
+        'INFO':     'blue',
+        'WARNING':  'yellow',
+        'ERROR':    'red',
+        'CRITICAL': 'red,bg_white',
+    }
+))
+
+root_logger.addHandler(handler)
 logger = logging.getLogger(__name__)
+
+for logger_name in ['', 'httpx', 'telegram', 'telegram.ext']:
+    logging.getLogger(logger_name).addFilter(UpdatesFilter())
 
 video_info_cache = {}
 last_update_time = {}
@@ -29,17 +119,24 @@ upload_progress = {}
 COOKIE_PATH = os.path.join('data', 'cookies.txt')
 os.makedirs('data', exist_ok=True)
 
-def format_user_info(user) -> str:
-    return f"{user.first_name} (@{user.username})" if user.username else f"{user.first_name} ({user.id})"
+def format_user_info(user, for_telegram=False) -> str:
+    if for_telegram:
+        username = f"@{user.username}" if user.username else f"{user.id}"
+        return f"{user.first_name} ({username})"
+    else:
+        username = f"{COLORS['cyan']}@{user.username}{COLORS['reset']}" if user.username else f"{user.id}"
+        return f"{COLORS['white']}{user.first_name}{COLORS['reset']} ({username})"
 
 async def log_to_channel(text: str):
     log_channel_id = config.user_manager.get_log_channel()
     if not log_channel_id:
         return
     try:
+
+        clean_text = re.sub(r'\033\[[0-9;]+m', '', text)
         await bot.send_message(
             chat_id=log_channel_id,
-            text=text,
+            text=clean_text,
             parse_mode=ParseMode.MARKDOWN
         )
     except Exception as e:
@@ -76,11 +173,17 @@ def restricted(sudo_only=False):
             user_info = format_user_info(update.effective_user)
             command = update.message.text.split()[0] if update.message.text else "unknown"
             
+            is_sudo = user_id in config.SUDO_USERS
+            sudo_indicator = f"{COLORS['yellow']}[SUDO]{COLORS['reset']} " if is_sudo else ""
+            logger.info(
+                f"🤖 {sudo_indicator}Command {COLORS['yellow']}{command}{COLORS['reset']} used by {user_info}"
+            )
+            
             if not config.user_manager.is_allowed(user_id):
                 logger.warning(f"Access denied for {user_info}")
                 await log_to_channel(
                     f"⚠️ *Unauthorized Bot Access Attempt*\n"
-                    f"├ User: `{user_info}`\n"
+                    f"├ User: `{format_user_info(update.effective_user, for_telegram=True)}`\n"
                     f"└ Command: `{command}`"
                 )
                 await update.message.reply_text("🚫 You are not authorized to use this bot.")
@@ -90,7 +193,7 @@ def restricted(sudo_only=False):
                 logger.warning(f"Sudo access denied for {user_info}")
                 await log_to_channel(
                     f"⚠️ *Unauthorized Sudo Access Attempt*\n"
-                    f"├ User: `{user_info}`\n"
+                    f"├ User: `{format_user_info(update.effective_user, for_telegram=True)}`\n"
                     f"└ Command: `{command}`"
                 )
                 await update.message.reply_text("🚫 This command is only available to sudo users.")
@@ -112,7 +215,7 @@ async def add_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"✅ User {user_id} added successfully.")
             await log_to_channel(
                 f"👥 *User Added*\n"
-                f"├ By: `{format_user_info(update.effective_user)}`\n"
+                f"├ By: `{format_user_info(update.effective_user, for_telegram=True)}`\n"
                 f"└ Added: `{user_id}`"
             )
         else:
@@ -136,7 +239,7 @@ async def remove_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text(f"✅ User {user_id} removed successfully.")
             await log_to_channel(
                 f"👥 *User Removed*\n"
-                f"├ By: `{format_user_info(update.effective_user)}`\n"
+                f"├ By: `{format_user_info(update.effective_user, for_telegram=True)}`\n"
                 f"└ Removed: `{user_id}`"
             )
         else:
@@ -172,7 +275,7 @@ async def set_log_channel_command(update: Update, context: ContextTypes.DEFAULT_
         await update.message.reply_text(f"✅ Log channel updated to {channel_id}")
         await log_to_channel(
             f"📢 *Log Channel Updated*\n"
-            f"├ By: `{format_user_info(update.effective_user)}`\n"
+            f"├ By: `{format_user_info(update.effective_user, for_telegram=True)}`\n"
             f"└ New: `{channel_id}`"
         )
     except ValueError:
@@ -181,9 +284,11 @@ async def set_log_channel_command(update: Update, context: ContextTypes.DEFAULT_
 @restricted()
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    user_info = format_user_info(user)
     
-    await log_to_channel(f"🤖 *Bot Started*\n└ User: `{user_info}`")
+    await log_to_channel(
+        f"🤖 *Bot Started*\n"
+        f"└ User: `{format_user_info(user, for_telegram=True)}`"
+    )
     
     help_text = (
         f'👋 Hi {user.first_name}!\n\n'
@@ -245,7 +350,7 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await log_to_channel(
         f"🔄 *Download Request*\n"
-        f"├ User: `{user.name}` ({user.id})\n"
+        f"├ User: `{format_user_info(user, for_telegram=True)}`\n"
         f"└ URL: `{context.args[0] if context.args else 'No URL provided'}`"
     )
     
@@ -258,7 +363,7 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     url = context.args[0]
-    if not re.match(r'https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)[\w-]+', url):
+    if not re.match(r'https?://(?:www\.)?(?:youtube\.com/(?:watch\?v=|live/)|youtu\.be/)[\w-]+', url):
         await update.message.reply_text("❌ Please provide a valid YouTube video URL.")
         return
 
@@ -269,16 +374,7 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     try:
-
-        use_cookies = context.user_data.get('use_cookies', False)
-        if use_cookies:
-            cookie_path = os.path.join('data', 'cookies.txt')
-            if not os.path.exists(cookie_path):
-                await update_status(status_message, "❌ No cookies found. Please contact a sudo user to set up cookies.")
-                return
-        else:
-            cookie_path = None
-        
+        cookie_path = os.path.join('data', 'cookies.txt') if context.user_data.get('use_cookies') else None
         downloader = YouTubeDownloader(cookie_path=cookie_path)
         info = await downloader.get_video_info(url)
         
@@ -288,7 +384,7 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'message_id': status_message.message_id,
             'chat_id': status_message.chat_id,
             'user': update.effective_user.name,
-            'use_cookies': use_cookies
+            'use_cookies': context.user_data.get('use_cookies', False)
         }
 
         keyboard = []
@@ -330,9 +426,6 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardMarkup(keyboard)
         )
 
-        if 'use_cookies' in context.user_data:
-            del context.user_data['use_cookies']
-
     except Exception as e:
         error_msg = f"❌ *Download Failed*\n└ Error: {str(e)}"
         await update_status(status_message, error_msg)
@@ -359,7 +452,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await log_to_channel(
             f"📥 *Download Started*\n"
-            f"├ User: `{video_data['user']}`\n"
+            f"├ User: `{format_user_info(update.effective_user, for_telegram=True)}`\n"
             f"├ Title: `{video_data['info']['title']}`\n"
             f"├ Type: {'Audio' if action == 'a' else 'Video'}\n"
             f"└ Format: {format_type}"
@@ -409,8 +502,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             if file_size > (config.MAX_DOWNLOAD_SIZE * 1024 * 1024) or config.FORCE_GOFILE:
                 await log_to_channel(
-                    f"📤 *Upload Started (Gofile)*\n"
-                    f"├ User: `{video_data['user']}`\n"
+                    f"📤 *Upload Started*\n"
+                    f"├ Platform: Gofile\n"
+                    f"├ User: `{format_user_info(update.effective_user, for_telegram=True)}`\n"
                     f"├ Title: `{title}`\n"
                     f"└ Size: {file_size / (1024*1024):.1f} MB"
                 )
@@ -449,6 +543,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     raise
                 
             else:
+                await log_to_channel(
+                    f"📤 *Upload Started*\n"
+                    f"├ Platform: Telegram\n"
+                    f"├ User: `{format_user_info(update.effective_user, for_telegram=True)}`\n"
+                    f"├ Title: `{title}`\n"
+                    f"└ Size: {file_size / (1024*1024):.1f} MB"
+                )
                 await progress_callback("📤 Uploading to Telegram...")
                 
                 with open(filename, 'rb') as f:
@@ -609,11 +710,11 @@ def main():
             download_command
         ))
 
-        logger.info("Bot started successfully")
+        logger.info(f"🚀 {COLORS['green']}Bot started successfully{COLORS['reset']}")
         application.run_polling(allowed_updates=Update.ALL_TYPES)
         
     except Exception as e:
-        logger.error(f"Failed to start bot: {e}")
+        logger.error(f"{COLORS['red']}Failed to start bot: {e}{COLORS['reset']}")
         raise
 
 @restricted(sudo_only=True)
@@ -654,7 +755,7 @@ async def set_cookie_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             )
             await log_to_channel(
                 "🔄 *Cookies Updated*\n"
-                f"├ By: `{format_user_info(update.effective_user)}`\n"
+                f"├ By: `{format_user_info(update.effective_user, for_telegram=True)}`\n"
                 f"└ Status: Success"
             )
         else:
@@ -670,7 +771,7 @@ async def set_cookie_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(f"❌ Error processing cookie file: {str(e)}")
         await log_to_channel(
             "⚠️ *Cookie Update Failed*\n"
-            f"├ By: `{format_user_info(update.effective_user)}`\n"
+            f"├ By: `{format_user_info(update.effective_user, for_telegram=True)}`\n"
             f"└ Error: `{str(e)}`"
         )
 
