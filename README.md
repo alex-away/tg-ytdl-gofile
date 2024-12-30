@@ -20,8 +20,8 @@ A Telegram bot that downloads YouTube videos and audio with advanced features an
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/yt-tg-bot.git
-cd yt-tg-bot
+git clone https://github.com/alex-away/tg-ytdl-gofile.git
+cd tg-ytdl-gofile
 ```
 
 2. Set up environment variables:
@@ -38,20 +38,20 @@ cp .env.example .env
 3. Build and run using Docker:
 ```bash
 # Build the image
-docker build -t yt-tg-bot .
+docker build -t tg-ytdl-gofile .
 
 # Run with environment variables from .env
-docker run -d --name yt-tg-bot --env-file .env yt-tg-bot
+docker run -d --name tg-ytdl-gofile --env-file .env tg-ytdl-gofile
 
 # Or run with manual environment variables
-docker run -d --name yt-tg-bot \
+docker run -d --name tg-ytdl-gofile \
     -e BOT_TOKEN=your_telegram_bot_token \
     -e SUDO_USERS=your_telegram_user_id \
     -e GOFILE_API_KEY=optional_gofile_key \
-    yt-tg-bot
+    tg-ytdl-gofile
 
 # View logs
-docker logs -f yt-tg-bot
+docker logs -f tg-ytdl-gofile
 ```
 
 4. Verify the bot is running:
@@ -60,7 +60,7 @@ docker logs -f yt-tg-bot
 docker ps
 
 # Check container logs for any errors
-docker logs yt-tg-bot
+docker logs tg-ytdl-gofile
 ```
 
 ### Manual Setup
